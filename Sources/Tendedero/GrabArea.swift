@@ -9,7 +9,11 @@ import SwiftUI
 /// - The Trash discards it.
 /// - Nowhere that accepts it: the photo flies back to the line.
 ///
-/// Click copies, press and hold opens Markup, the corner cross discards.
+/// Dragged sideways, the photo slides along the line to any spot instead.
+/// Pulling it down off the line turns the slide into a drag out.
+///
+/// Click copies, double click shows it large, press and hold opens Markup,
+/// the corner cross discards. Whatever you click or slide comes to the front.
 struct GrabArea: NSViewRepresentable {
     let item: Pegged
     let line: Line
@@ -29,8 +33,14 @@ struct GrabArea: NSViewRepresentable {
         let line = line
         view.url = item.url
         view.dragImage = item.thumb
-        view.onClick = { line.copy(id) }
-        view.onDoubleClick = { line.open(id) }
+        view.onClick = {
+            line.copy(id)
+            line.bringToFront(id)
+        }
+        view.onDoubleClick = { line.show(id) }
+        view.onSlideStart = { line.beginSlide(id) }
+        view.onSlide = { dx in line.slide(id, by: dx) }
+        view.onSlideEnd = { line.endSlide() }
         view.onDragStart = { line.draggingID = id }
         view.onDragEnd = {
             line.draggingID = nil
@@ -44,9 +54,14 @@ struct GrabArea: NSViewRepresentable {
         view.menuProvider = {
             let menu = NSMenu()
             menu.addItem(ClosureMenuItem(L("Copy", "Copiar")) { line.copy(id) })
+            menu.addItem(ClosureMenuItem(L("Show", "Ver")) { line.show(id) })
             menu.addItem(ClosureMenuItem(L("Open", "Abrir")) { line.open(id) })
             menu.addItem(ClosureMenuItem(L("Markup", "Marcación")) { line.markup(id) })
             menu.addItem(ClosureMenuItem(L("Show in Finder", "Mostrar en Finder")) { line.reveal(id) })
+            menu.addItem(.separator())
+            menu.addItem(ClosureMenuItem(L("Bring to Front", "Traer al frente")) { line.bringToFront(id) })
+            menu.addItem(ClosureMenuItem(L("Send to Back", "Enviar al fondo")) { line.sendToBack(id) })
+            menu.addItem(.separator())
             let inInbox = line.isInInbox(id)
             if inInbox {
                 menu.addItem(ClosureMenuItem(L("Save to Desktop", "Guardar en el Escritorio")) { line.saveToDesktop(id) })
@@ -70,6 +85,9 @@ final class GrabView: NSView, NSDraggingSource {
     var dragImage: NSImage?
     var onClick: () -> Void = {}
     var onDoubleClick: () -> Void = {}
+    var onSlideStart: () -> Void = {}
+    var onSlide: (CGFloat) -> Void = { _ in }
+    var onSlideEnd: () -> Void = {}
     var onDragStart: () -> Void = {}
     var onDragEnd: () -> Void = {}
     var onTrash: () -> Void = {}
@@ -80,12 +98,17 @@ final class GrabView: NSView, NSDraggingSource {
 
     private var downPoint: NSPoint?
     private var startedDrag = false
+    private var sliding = false
     private var holdTimer: Timer?
     private var didLongPress = false
 
     /// How long you hold before Markup opens. Long enough not to fire on a
     /// slow click, short enough to feel deliberate.
     private static let holdDuration: TimeInterval = 0.45
+
+    /// How far below the line you pull a sliding photo before it comes off
+    /// the line and is dragged out as a file.
+    private static let pullOff: CGFloat = 44
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -113,6 +136,7 @@ final class GrabView: NSView, NSDraggingSource {
         }
         downPoint = event.locationInWindow
         startedDrag = false
+        sliding = false
         didLongPress = false
         onPressChange(true)
         holdTimer?.invalidate()
@@ -133,11 +157,34 @@ final class GrabView: NSView, NSDraggingSource {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let start = downPoint, !startedDrag, let url else { return }
+        guard let start = downPoint, !startedDrag else { return }
         let p = event.locationInWindow
-        guard hypot(p.x - start.x, p.y - start.y) > 4, !didLongPress else { return }
-        startedDrag = true
+        let dx = p.x - start.x, dy = p.y - start.y
+        if sliding {
+            // Window coordinates grow upward, so pulling down makes dy negative.
+            if -dy > Self.pullOff {
+                sliding = false
+                onSlideEnd()
+                beginFileDrag(with: event)
+            } else {
+                onSlide(dx)
+            }
+            return
+        }
+        guard hypot(dx, dy) > 4, !didLongPress else { return }
         endPress()
+        if abs(dx) > abs(dy) {
+            sliding = true
+            onSlideStart()
+            onSlide(dx)
+        } else {
+            beginFileDrag(with: event)
+        }
+    }
+
+    private func beginFileDrag(with event: NSEvent) {
+        guard let url else { return }
+        startedDrag = true
 
         let item = NSDraggingItem(pasteboardWriter: url as NSURL)
         item.setDraggingFrame(imageFrame(), contents: dragImage)
@@ -150,6 +197,12 @@ final class GrabView: NSView, NSDraggingSource {
 
     override func mouseUp(with event: NSEvent) {
         endPress()
+        if sliding {
+            sliding = false
+            downPoint = nil
+            onSlideEnd()
+            return
+        }
         if downPoint != nil && !startedDrag && !didLongPress && event.clickCount == 1 { onClick() }
         downPoint = nil
         didLongPress = false

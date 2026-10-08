@@ -16,6 +16,8 @@ enum Layout {
         return ropeTop + 4 * sag(width: width) * f * (1 - f)
     }
 
+    /// The even layout used before photos could be moved; still used to
+    /// place photos saved by older versions.
     static func x(index: Int, count: Int, width: CGFloat) -> CGFloat {
         let total = CGFloat(max(count - 1, 0)) * spacing
         return width / 2 - total / 2 + CGFloat(index) * spacing
@@ -37,19 +39,20 @@ struct LineView: View {
                         .transition(.opacity)
                 }
 
-                ForEach(Array(line.items.enumerated()), id: \.element.id) { index, item in
-                    let x = Layout.x(index: index, count: line.items.count, width: width)
+                ForEach(line.items) { item in
+                    let x = CGFloat(item.position) * width
                     let ropeY = Layout.ropeY(x: x, width: width)
                     PeggedView(item: item, line: line)
                         .frame(width: Layout.cardWidth, height: Layout.panelHeight - ropeY, alignment: .top)
                         .position(x: x, y: ropeY - Layout.pinAbove + (Layout.panelHeight - ropeY) / 2)
+                        .zIndex(line.slidingID == item.id ? 1 : 0)
                 }
             }
             .animation(.spring(response: 0.55, dampingFraction: 0.78), value: line.items.map(\.id))
             .animation(.easeInOut(duration: 0.3), value: line.items.isEmpty)
             // Tucked away, the whole line waits above the top edge and slides
             // out from under the menu bar, the way an auto-hiding Dock does.
-            .offset(y: line.revealed ? 0 : -(Layout.panelHeight + 12))
+            .offset(y: line.revealed ? line.topOffset : -(Layout.panelHeight + 12))
             .animation(line.revealed ? .spring(response: 0.42, dampingFraction: 0.82)
                                      : .easeIn(duration: 0.22), value: line.revealed)
         }

@@ -15,7 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// landing on the Desktop, and they still hang on the line.
     private var safetyWatcher: ScreenshotWatcher?
     private var signalSources: [DispatchSourceSignal] = []
-    private var hotKey: HotKey?
+    private var hotKeys: [HotKey] = []
     private var cancellables = Set<AnyCancellable>()
     private var mouseTimer: Timer?
 
@@ -44,6 +44,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// The screen a new capture was taken on: the line goes there.
     private var pendingScreen: NSScreen?
 
+    /// The line stays down instead of tucking away when the pointer leaves.
+    /// The shortcut can still put it away until it is brought down again.
+    private var alwaysShow: Bool {
+        get { UserDefaults.standard.bool(forKey: "alwaysShow") }
+        set { UserDefaults.standard.set(newValue, forKey: "alwaysShow") }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         let host = NSHostingView(rootView: LineView(line: line))
         host.sizingOptions = []
@@ -55,9 +62,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         restoreSettingsOnTermination()
         startWatcher()
 
-        hotKey = HotKey(keyCode: kVK_ANSI_T, modifiers: controlKey | optionKey) { [weak self] in
-            self?.toggle()
-        }
+        // ⌥⌘T shows or hides the line. ⌃⌥⌘T keeps it down for good, or lets
+        // it tuck away again.
+        hotKeys = [
+            HotKey(keyCode: kVK_ANSI_T, modifiers: optionKey | cmdKey) { [weak self] in
+                self?.toggle()
+            },
+            HotKey(keyCode: kVK_ANSI_T, modifiers: controlKey | optionKey | cmdKey) { [weak self] in
+                self?.toggleAlwaysShow()
+            },
+        ]
 
         setUpStatusItem()
         watchMenuBarClicks()
@@ -90,6 +104,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.updateCapacity()
             }
         }
+
+        if alwaysShow { setAlwaysShow(true) }
 
         if !Inbox.wasOffered {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.offerInbox() }
@@ -243,9 +259,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func cardFrame(for id: UUID) -> CGRect? {
         guard let index = line.items.firstIndex(where: { $0.id == id }) else { return nil }
         let width = panel.frame.width
-        let x = Layout.x(index: index, count: line.items.count, width: width)
+        let x = CGFloat(line.items[index].position) * width
         let viewTop = Layout.ropeY(x: x, width: width) - Layout.pinAbove
-        let cardTop = viewTop + PeggedView.cardOffsetBelowTop
+        let cardTop = line.topOffset + viewTop + PeggedView.cardOffsetBelowTop
         let size = PeggedView.cardSize(for: line.items[index].thumb.size)
         return CGRect(x: panel.frame.minX + x - size.width / 2,
                       y: panel.frame.maxY - cardTop - size.height,
@@ -258,7 +274,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let blocked = panel.screen.map(FullScreen.isActive(on:))
             ?? LinePanel.screenUnderPointer().map(FullScreen.isActive(on:)) ?? false
         if wanted && !blocked {
+            let wasPresent = isPresent
             present()
+            // Back from full screen, an always shown line comes down again.
+            if !wasPresent && alwaysShow { reveal() }
         } else {
             dismiss()
         }
@@ -306,7 +325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggle() {
         if isRevealed {
             setRevealed(false)
-            if line.liveCount == 0 {
+            if line.liveCount == 0 && !alwaysShow {
                 keepOpen = false
                 wanted = false
                 refresh()
@@ -318,6 +337,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             updateCapacity()
             refresh()
             reveal(pinned: true)
+        }
+    }
+
+    /// From the shortcut: turning it off puts the line away at once, so the
+    /// key always does something you can see.
+    private func toggleAlwaysShow() {
+        if alwaysShow {
+            setAlwaysShow(false)
+            setRevealed(false)
+        } else {
+            setAlwaysShow(true)
+        }
+    }
+
+    private func setAlwaysShow(_ on: Bool) {
+        alwaysShow = on
+        if on {
+            keepOpen = true
+            wanted = true
+            panel.placeOnScreen()
+            updateCapacity()
+            refresh()
+            reveal()
+        } else {
+            keepOpen = false
+            if line.liveCount == 0 {
+                wanted = false
+                refresh()
+            }
         }
     }
 
@@ -358,7 +406,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 guard NSScreen.screens.contains(where: { Self.menuBarBand(of: $0).contains(p) }) else { return }
                 self.menuBarSuppressed = true
                 self.hotZoneSince = nil
-                if self.isRevealed {
+                if self.isRevealed && !self.alwaysShow {
                     self.pinned = false
                     self.setRevealed(false)
                 }
@@ -387,7 +435,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Pushing against the top edge is part of it, and it also works
             // when another display sits above and the pointer never stops.
             if let screen = screenUnderPointer, inMenuBar, !menuBarSuppressed,
-               !FullScreen.isActive(on: screen) {
+               Placement.allows(screen), !FullScreen.isActive(on: screen) {
                 let since = hotZoneSince ?? now
                 hotZoneSince = since
                 if now.timeIntervalSince(since) >= Self.revealDelay {
@@ -414,7 +462,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let inside = NSMouseInRect(mouse, zone, false)
         if inside && pinned { pinned = false }
 
-        let busy = pinned || GrabView.isDragging || line.pressedID != nil || now < peekUntil
+        let busy = alwaysShow || pinned || GrabView.isDragging || line.slidingID != nil || line.pressedID != nil || now < peekUntil
         if inside || busy {
             awaySince = nil
         } else {
@@ -431,7 +479,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// mouse while the cursor is over a photo. Everywhere else, clicks go to
     /// whatever is underneath.
     private func updateMousePassThrough(_ mouse: NSPoint) {
-        guard !GrabView.isDragging else { return }
+        guard !GrabView.isDragging, line.slidingID == nil else { return }
         let local = panel.convertPoint(fromScreen: mouse)
         let flipped = CGPoint(x: local.x, y: panel.frame.height - local.y)
         let overPhoto = line.hitRects.values.contains { $0.insetBy(dx: -4, dy: -4).contains(flipped) }
@@ -441,8 +489,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateCapacity() {
-        let usable = panel.frame.width - 200
-        line.maxItems = max(3, min(12, Int(usable / Layout.spacing)))
+        if panel.frame.width > 0 { line.width = panel.frame.width }
     }
 
     // MARK: Menu bar
@@ -465,8 +512,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.toggle()
         }
         toggleItem.keyEquivalent = "t"
-        toggleItem.keyEquivalentModifierMask = [.control, .option]
+        toggleItem.keyEquivalentModifierMask = [.option, .command]
         menu.addItem(toggleItem)
+
+        let always = ClosureMenuItem(L("Always show", "Mostrar siempre")) { [weak self] in
+            guard let self else { return }
+            self.setAlwaysShow(!self.alwaysShow)
+        }
+        always.state = alwaysShow ? .on : .off
+        always.keyEquivalent = "t"
+        always.keyEquivalentModifierMask = [.control, .option, .command]
+        menu.addItem(always)
 
         let clearItem = ClosureMenuItem(L("Take everything down", "Descolgar todo")) { [weak self] in
             self?.line.clear()
@@ -496,6 +552,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sound.state = line.soundOn ? .on : .off
         menu.addItem(sound)
 
+        let mainOnly = ClosureMenuItem(L("Main screen only", "Solo en la pantalla principal")) { [weak self] in
+            Placement.mainScreenOnly.toggle()
+            self?.moveLine()
+        }
+        mainOnly.state = Placement.mainScreenOnly ? .on : .off
+        mainOnly.toolTip = L("The line hangs only on the screen with the Dock",
+                             "El tendedero solo se cuelga en la pantalla con el Dock")
+        menu.addItem(mainOnly)
+
+        let behind = ClosureMenuItem(L("Behind windows", "Detrás de las ventanas")) { [weak self] in
+            Placement.behindWindows.toggle()
+            self?.panel.applyLevel()
+        }
+        behind.state = Placement.behindWindows ? .on : .off
+        behind.toolTip = L("The line hangs on the desktop, under every window",
+                           "El tendedero se cuelga en el escritorio, bajo todas las ventanas")
+        menu.addItem(behind)
+
+        let offset = NSMenuItem()
+        offset.view = SliderMenuView(
+            title: L("Distance from the top", "Distancia desde arriba"),
+            value: Double(Placement.topOffset), range: 0...Double(Placement.maxTopOffset)
+        ) { [weak self] value in
+            self?.setTopOffset(CGFloat(value))
+        }
+        menu.addItem(offset)
+
         let login = ClosureMenuItem(L("Open at login", "Abrir al iniciar sesión")) {
             AppDelegate.toggleLaunchAtLogin()
         }
@@ -506,6 +589,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(ClosureMenuItem(L("Quit Tendedero", "Salir de Tendedero"), key: "q") {
             NSApp.terminate(nil)
         })
+    }
+
+    /// Puts the line on the right screen after a placement change.
+    private func moveLine() {
+        panel.placeOnScreen()
+        updateCapacity()
+        refresh()
+    }
+
+    /// Moving the slider brings the line down, so you see where it will hang.
+    private func setTopOffset(_ value: CGFloat) {
+        Placement.topOffset = value.rounded()
+        line.topOffset = Placement.topOffset
+        panel.placeOnScreen(panel.screen)
+        wanted = true
+        refresh()
+        reveal(pinned: true)
     }
 
     private static func toggleLaunchAtLogin() {
@@ -523,5 +623,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()
         }
+    }
+}
+
+/// A labelled slider inside a menu, laid out like the menu's own items.
+final class SliderMenuView: NSView {
+    private let onChange: (Double) -> Void
+    private let slider: NSSlider
+    private let valueLabel = NSTextField(labelWithString: "")
+
+    init(title: String, value: Double, range: ClosedRange<Double>, onChange: @escaping (Double) -> Void) {
+        self.onChange = onChange
+        slider = NSSlider(value: value, minValue: range.lowerBound, maxValue: range.upperBound, target: nil, action: nil)
+        super.init(frame: NSRect(x: 0, y: 0, width: 240, height: 48))
+
+        let label = NSTextField(labelWithString: title)
+        label.font = .menuFont(ofSize: 0)
+        valueLabel.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        valueLabel.textColor = .secondaryLabelColor
+        valueLabel.alignment = .right
+        slider.isContinuous = true
+        slider.controlSize = .small
+        slider.target = self
+        slider.action = #selector(changed)
+
+        for view in [label, valueLabel, slider] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+            valueLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            valueLabel.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
+            slider.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            slider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            slider.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 4),
+        ])
+        showValue()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func showValue() {
+        valueLabel.stringValue = "\(Int(slider.doubleValue.rounded())) pt"
+    }
+
+    @objc private func changed() {
+        showValue()
+        onChange(slider.doubleValue)
     }
 }

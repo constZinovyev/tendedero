@@ -40,13 +40,15 @@ Rest the pointer in the menu bar and it glides down. Move away and it's gone.
 |:--|:--|
 | Click | Copy the image. |
 | Press and hold | Open it in Markup. |
-| Double click | Open it in Preview. |
+| Double click | See it large, right on top of everything. Click anywhere to close. |
+| Drag along the line | Hang it anywhere you like. |
 | Drag into an app | Send a copy. It stays on the line. |
 | Drag into a folder | Keep it there. It leaves the line. |
 | Drag to the Trash, or click the cross | Let it go. |
 | Rest the pointer in the menu bar | Bring the line down on that screen. |
 | Click anything in the menu bar | Put it away. |
-| <kbd>⌃</kbd>&thinsp;<kbd>⌥</kbd>&thinsp;<kbd>T</kbd> | Show or hide the line. |
+| <kbd>⌥</kbd>&thinsp;<kbd>⌘</kbd>&thinsp;<kbd>T</kbd> | Show or hide the line. |
+| <kbd>⌃</kbd>&thinsp;<kbd>⌥</kbd>&thinsp;<kbd>⌘</kbd>&thinsp;<kbd>T</kbd> | Keep the line always in view, or let it tuck away again. |
 
 <br>
 

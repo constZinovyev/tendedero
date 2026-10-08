@@ -11,12 +11,15 @@ struct Pegged: Identifiable, Equatable {
     var thumb: NSImage
     /// Every photo hangs a little crooked, like on a real line.
     let tilt = Double.random(in: -2.5...2.5)
+    /// Where it hangs, as a fraction of the line's width, so it keeps its
+    /// spot on a screen of any size.
+    var position: Double = 0.5
     var falling = false
     /// Still flying in from where it was captured; the card waits hidden.
     var flying = false
 
     static func == (a: Pegged, b: Pegged) -> Bool {
-        a.id == b.id && a.falling == b.falling && a.flying == b.flying && a.thumb === b.thumb
+        a.id == b.id && a.position == b.position && a.falling == b.falling && a.flying == b.flying && a.thumb === b.thumb
     }
 }
 
@@ -29,15 +32,19 @@ final class Line: ObservableObject {
     @Published var copiedID: UUID?
     @Published var draggingID: UUID?
     @Published var pressedID: UUID?
+    /// The photo being slid along the line to a new spot.
+    @Published private(set) var slidingID: UUID?
     /// Whether the line has slid down into view.
     @Published var revealed = false
+    /// How far below the menu bar the line hangs.
+    @Published var topOffset = Placement.topOffset
 
     /// Card frames in window coordinates, reported by the views. The panel
     /// uses them to only catch clicks over photos and let the rest through.
     var hitRects: [UUID: CGRect] = [:]
 
-    var maxItems = 8
-
+    /// The line's width in points, kept up to date by the panel.
+    var width: CGFloat = 1440
 
     var soundOn: Bool {
         get { !UserDefaults.standard.bool(forKey: "soundOff") }
@@ -47,6 +54,8 @@ final class Line: ObservableObject {
     var liveCount: Int { items.filter { !$0.falling }.count }
 
     private let storeKey = "pegged"
+    private let positionsKey = "peggedPositions"
+    private var slideStart: Double = 0
 
     init() {
         restore()
@@ -56,16 +65,13 @@ final class Line: ObservableObject {
     // MARK: Hanging and dropping
 
     @discardableResult
-    func hang(_ url: URL, quietly: Bool = false, flying: Bool = false) -> UUID? {
+    func hang(_ url: URL, quietly: Bool = false, flying: Bool = false, at position: Double? = nil) -> UUID? {
         guard !items.contains(where: { $0.url == url && !$0.falling }),
               let thumb = makeThumbnail(url) else { return nil }
         var item = Pegged(url: url, thumb: thumb)
         item.flying = flying
+        item.position = clamped(position ?? freeSpot())
         items.append(item)
-        // A full line lets the oldest photo fall off the far end.
-        while liveCount > maxItems, let oldest = items.first(where: { !$0.falling }) {
-            drop(oldest.id, quietly: true)
-        }
         save()
         if !quietly { play("Tink", volume: 0.35) }
         return item.id
@@ -109,6 +115,64 @@ final class Line: ObservableObject {
         }
     }
 
+    // MARK: Moving along the line
+
+    /// The edges a pin can reach, so the card never hangs off the screen.
+    private var margin: Double { min(0.45, Double((Layout.cardWidth / 2 + 12) / max(width, 1))) }
+
+    private func clamped(_ position: Double) -> Double {
+        min(max(position, margin), 1 - margin)
+    }
+
+    /// A new photo is pinned next to the last one, like on a real line. When
+    /// there is no room left on the right, it goes into the widest gap.
+    private func freeSpot() -> Double {
+        let taken = items.filter { !$0.falling }.map(\.position).sorted()
+        guard let last = taken.last else { return 0.5 }
+        let step = Double(Layout.spacing / max(width, 1))
+        if last + step <= 1 - margin { return last + step }
+        let bounds = [margin] + taken + [1 - margin]
+        var best = (gap: -1.0, spot: 0.5)
+        for (a, b) in zip(bounds, bounds.dropFirst()) where b - a > best.gap {
+            best = (b - a, (a + b) / 2)
+        }
+        return best.spot
+    }
+
+    func beginSlide(_ id: UUID) {
+        guard let item = items.first(where: { $0.id == id }) else { return }
+        slideStart = item.position
+        slidingID = id
+    }
+
+    /// Slides the photo by `dx` points from where the slide began.
+    func slide(_ id: UUID, by dx: CGFloat) {
+        guard slidingID == id, let i = items.firstIndex(where: { $0.id == id }) else { return }
+        items[i].position = clamped(slideStart + Double(dx / max(width, 1)))
+    }
+
+    func endSlide() {
+        guard let id = slidingID else { return }
+        slidingID = nil
+        bringToFront(id)
+    }
+
+    // MARK: Stacking
+
+    /// Photos overlap in the order of the list: the last one is on top. The
+    /// one you last touched comes to the front, like a window.
+    func bringToFront(_ id: UUID) {
+        guard let i = items.firstIndex(where: { $0.id == id }), i != items.count - 1 else { return }
+        items.append(items.remove(at: i))
+        save()
+    }
+
+    func sendToBack(_ id: UUID) {
+        guard let i = items.firstIndex(where: { $0.id == id }), i != 0 else { return }
+        items.insert(items.remove(at: i), at: 0)
+        save()
+    }
+
     // MARK: Actions on one photo
 
     func copy(_ id: UUID) {
@@ -124,6 +188,13 @@ final class Line: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             if self?.copiedID == id { self?.copiedID = nil }
         }
+    }
+
+    /// A large look at the photo in the middle of the screen. The line stays
+    /// as it is and no other app opens.
+    func show(_ id: UUID) {
+        guard let item = items.first(where: { $0.id == id }) else { return }
+        PhotoPreview.shared.show(item.url, on: LinePanel.screenUnderPointer())
     }
 
     func open(_ id: UUID) {
@@ -215,7 +286,7 @@ final class Line: ObservableObject {
     private func scheduleGust() {
         DispatchQueue.main.asyncAfter(deadline: .now() + .random(in: 7...16)) { [weak self] in
             guard let self else { return }
-            if !self.items.isEmpty && self.draggingID == nil { self.gust += 1 }
+            if !self.items.isEmpty && self.draggingID == nil && self.slidingID == nil { self.gust += 1 }
             self.scheduleGust()
         }
     }
@@ -223,14 +294,21 @@ final class Line: ObservableObject {
     // MARK: Persistence
 
     private func save() {
-        let paths = items.filter { !$0.falling }.map(\.url.path)
-        UserDefaults.standard.set(paths, forKey: storeKey)
+        let live = items.filter { !$0.falling }
+        UserDefaults.standard.set(live.map(\.url.path), forKey: storeKey)
+        let positions = Dictionary(live.map { ($0.url.path, $0.position) }, uniquingKeysWith: { $1 })
+        UserDefaults.standard.set(positions, forKey: positionsKey)
     }
 
     private func restore() {
-        let paths = UserDefaults.standard.stringArray(forKey: storeKey) ?? []
-        for path in paths where FileManager.default.fileExists(atPath: path) {
-            hang(URL(fileURLWithPath: path), quietly: true)
+        let paths = (UserDefaults.standard.stringArray(forKey: storeKey) ?? [])
+            .filter { FileManager.default.fileExists(atPath: $0) }
+        let positions = UserDefaults.standard.dictionary(forKey: positionsKey) as? [String: Double] ?? [:]
+        for (index, path) in paths.enumerated() {
+            // Lines saved before photos could be moved keep their old, even layout.
+            let position = positions[path]
+                ?? Double(Layout.x(index: index, count: paths.count, width: width) / width)
+            hang(URL(fileURLWithPath: path), quietly: true, at: position)
         }
     }
 

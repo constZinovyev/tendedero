@@ -9,10 +9,12 @@ struct PeggedView: View {
     @State private var swing: Double = 0
     @State private var arrived = false
     @State private var hovering = false
+    @State private var slideTick = 0
 
     private var copied: Bool { line.copiedID == item.id }
     private var dragging: Bool { line.draggingID == item.id }
     private var pressed: Bool { line.pressedID == item.id }
+    private var sliding: Bool { line.slidingID == item.id }
 
     var body: some View {
         VStack(spacing: -12) {
@@ -31,6 +33,8 @@ struct PeggedView: View {
         .onChange(of: item.flying) { was, now in if was && !now { land() } }
         .onChange(of: line.gust) { _, _ in breeze() }
         .onChange(of: copied) { _, isCopied in if isCopied { nudge(3) } }
+        .onChange(of: item.position) { old, new in if sliding { trail(new - old) } }
+        .onChange(of: sliding) { _, now in if !now { settle() } }
     }
 
     /// The photo fits inside the card area keeping its proportions, so the
@@ -130,6 +134,24 @@ struct PeggedView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             nudge(Double.random(in: 1.6...3.4))
         }
+    }
+
+    /// Sliding along the line, the photo trails behind the pin and swings
+    /// back once it stops.
+    private func trail(_ delta: Double) {
+        let speed = delta * Double(line.width)
+        withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.7)) {
+            swing = min(14, max(-14, speed * 0.9))
+        }
+        slideTick += 1
+        let tick = slideTick
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            if tick == slideTick { settle() }
+        }
+    }
+
+    private func settle() {
+        withAnimation(.interpolatingSpring(stiffness: 38, damping: 2.4)) { swing = 0 }
     }
 
     private func nudge(_ degrees: Double) {
