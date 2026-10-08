@@ -6,7 +6,6 @@ struct PeggedView: View {
     let item: Pegged
     @ObservedObject var line: Line
 
-    @State private var swing: Double = 0
     @State private var arrived = false
     @State private var hovering = false
     @State private var slideTick = 0
@@ -22,7 +21,9 @@ struct PeggedView: View {
                 .zIndex(1)
             card
         }
-        .rotationEffect(.degrees(swing + item.tilt), anchor: .top)
+        // The resting tilt only; the swing on top of it is played by Core
+        // Animation on the layer around this view (see Sway).
+        .rotationEffect(.degrees(item.tilt), anchor: .top)
         .offset(y: arrived ? 0 : -46)
         // The fall itself is drawn over the whole screen by CaptureFlight, so
         // the card here just steps aside at once.
@@ -108,7 +109,7 @@ struct PeggedView: View {
             .background(
                 GeometryReader { g in
                     Color.clear.preference(key: HitRectsKey.self,
-                                           value: item.falling ? [:] : [item.id: g.frame(in: .global)])
+                                           value: item.falling ? [:] : [item.id: g.frame(in: .named(SwayHost<EmptyView>.space))])
                 }
             )
     }
@@ -119,9 +120,8 @@ struct PeggedView: View {
             arrived = true
             return
         }
-        swing = 16
         withAnimation(.spring(response: 0.42, dampingFraction: 0.72)) { arrived = true }
-        withAnimation(.interpolatingSpring(stiffness: 46, damping: 2.6)) { swing = 0 }
+        sway.spring(from: 16, stiffness: 46, damping: 2.6)
     }
 
     /// Landing after the flight: no jump, just a small sway from rest.
@@ -140,9 +140,7 @@ struct PeggedView: View {
     /// back once it stops.
     private func trail(_ delta: Double) {
         let speed = delta * Double(line.width)
-        withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.7)) {
-            swing = min(14, max(-14, speed * 0.9))
-        }
+        sway.follow(min(14, max(-14, speed * 0.9)))
         slideTick += 1
         let tick = slideTick
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
@@ -150,15 +148,14 @@ struct PeggedView: View {
         }
     }
 
+    private var sway: Sway { line.sway(item.id) }
+
     private func settle() {
-        withAnimation(.interpolatingSpring(stiffness: 38, damping: 2.4)) { swing = 0 }
+        sway.settle()
     }
 
     private func nudge(_ degrees: Double) {
-        withAnimation(.easeOut(duration: 0.3)) { swing = degrees }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            withAnimation(.interpolatingSpring(stiffness: 38, damping: 2.4)) { swing = 0 }
-        }
+        sway.nudge(degrees)
     }
 }
 

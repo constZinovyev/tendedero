@@ -401,11 +401,11 @@ final class DecorView: NSView {
         let origin = window.frame.origin
         switch decor {
         case .candles:
-            candleLayers.render(store.candles, style: store.candleStyle, origin: origin, scale: scale)
+            candleLayers.render(store.candles, style: store.candleStyle, origin: origin, size: bounds.size, scale: scale)
             geometry = nil
         case .garland:
             guard let g = garland else { return }
-            garlandLayers.render([g], style: store.style, origin: origin, scale: scale)
+            garlandLayers.render([g], style: store.style, origin: origin, size: bounds.size, scale: scale)
             let geo = GarlandGeometry(g)
             geometry = (g, geo, geo.bulbPositions(spacing: g.spacing).map { store.style.bulbCenter(below: $0) })
         }

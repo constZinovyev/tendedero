@@ -42,6 +42,15 @@ final class Line: ObservableObject {
     /// Card frames in window coordinates, reported by the views. The panel
     /// uses them to only catch clicks over photos and let the rest through.
     var hitRects: [UUID: CGRect] = [:]
+
+    /// Each photo's swing, played by Core Animation.
+    private var sways: [UUID: Sway] = [:]
+    func sway(_ id: UUID) -> Sway {
+        if let s = sways[id] { return s }
+        let s = Sway()
+        sways[id] = s
+        return s
+    }
     /// A card's frame on screen as it hangs right now, from the panel.
     var cardScreenFrame: ((UUID) -> CGRect?)?
 
@@ -105,6 +114,7 @@ final class Line: ObservableObject {
         if !quietly { play("Pop", volume: 0.25) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             self?.items.removeAll { $0.id == id }
+            self?.sways[id] = nil
         }
     }
 

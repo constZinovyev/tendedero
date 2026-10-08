@@ -103,10 +103,12 @@ final class CandleLayers {
     }
     private var pictures: Pictures?
 
-    func render(_ set: CandleSet?, style: CandleStyle, origin: CGPoint, scale: CGFloat) {
+    /// `size` is the area to draw in: the cached candles are flattened to it.
+    func render(_ set: CandleSet?, style: CandleStyle, origin: CGPoint, size: CGSize, scale: CGFloat) {
         self.scale = scale
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        root.frame = CGRect(origin: .zero, size: size)
         root.sublayers?.forEach { $0.removeFromSuperlayer() }
         defer { CATransaction.commit() }
         guard let set else { return }
@@ -115,6 +117,7 @@ final class CandleLayers {
         let u = style.size
         let base = CGPoint(x: set.position.x - origin.x, y: set.position.y - origin.y)
         let still = CALayer()
+        still.frame = root.bounds
         var halos: [CALayer] = []
         var flames: [CALayer] = []
 

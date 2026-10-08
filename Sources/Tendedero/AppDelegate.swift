@@ -18,7 +18,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hotKeys: [HotKey] = []
     private var garlands: GarlandController!
     private var cancellables = Set<AnyCancellable>()
-    private var mouseTimer: Timer?
+    /// Watching the pointer: event monitors, so nothing runs while the
+    /// mouse is still, and one timer for the next delayed decision.
+    private var mouseMonitors: [Any] = []
+    private var wakeTimer: Timer?
 
     /// Whether the panel is ordered in. It can be in and still tucked away
     /// above the top edge, like an auto-hiding Dock.
@@ -325,6 +328,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if seconds > 0 { peekUntil = Date().addingTimeInterval(seconds) }
         awaySince = nil
         setRevealed(true)
+        // A peek has to tuck away again even if the mouse never moves.
+        wake(after: 0.05)
     }
 
     private func setRevealed(_ on: Bool) {
@@ -385,19 +390,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// The pointer is followed through mouse events instead of a timer
+    /// polling it 30 times a second: when the mouse rests, nothing runs.
+    /// What has to happen later, like the line coming down after the pointer
+    /// rested in the menu bar, gets a single timer for that moment.
     private func startMouseTracking() {
-        guard mouseTimer == nil else { return }
-        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+        guard mouseMonitors.isEmpty else { return }
+        let events: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged,
+                                              .leftMouseUp, .rightMouseUp]
+        let handle: (NSEvent?) -> Void = { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
-        RunLoop.main.add(timer, forMode: .common)
-        mouseTimer = timer
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: events, handler: handle) { mouseMonitors.append(m) }
+        if let m = NSEvent.addLocalMonitorForEvents(matching: events, handler: { handle($0); return $0 }) {
+            mouseMonitors.append(m)
+        }
+        tick()
     }
 
     private func stopMouseTracking() {
-        mouseTimer?.invalidate()
-        mouseTimer = nil
+        mouseMonitors.forEach(NSEvent.removeMonitor)
+        mouseMonitors.removeAll()
+        wakeTimer?.invalidate()
+        wakeTimer = nil
         panel.ignoresMouseEvents = true
+    }
+
+    /// Runs `tick` once after `delay`, replacing any earlier wake-up.
+    private func wake(after delay: TimeInterval) {
+        wakeTimer?.invalidate()
+        let timer = Timer(timeInterval: max(0.01, delay), repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.wakeTimer = nil
+                self?.tick()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        wakeTimer = timer
     }
 
     /// How long the cursor rests against the top edge before the line comes
@@ -462,6 +491,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                     refresh()
                     reveal()
+                } else {
+                    // Check again when the pointer has rested long enough.
+                    wake(after: Self.revealDelay - now.timeIntervalSince(since))
                 }
             } else {
                 hotZoneSince = nil
@@ -481,12 +513,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let busy = alwaysShow || pinned || GrabView.isDragging || line.slidingID != nil || line.pressedID != nil || now < peekUntil
         if inside || busy {
             awaySince = nil
+            // A peek ends on its own; look again then.
+            if !inside && now < peekUntil { wake(after: peekUntil.timeIntervalSince(now) + 0.01) }
         } else {
             let since = awaySince ?? now
             awaySince = since
             if now.timeIntervalSince(since) >= Self.retractDelay {
                 awaySince = nil
                 setRevealed(false)
+            } else {
+                wake(after: Self.retractDelay - now.timeIntervalSince(since))
             }
         }
     }

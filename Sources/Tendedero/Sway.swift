@@ -1,0 +1,221 @@
+import AppKit
+import QuartzCore
+import SwiftUI
+
+/// The swing of one photo on its pin, played by Core Animation.
+///
+/// SwiftUI would animate a swing by recomputing the whole line on every
+/// frame for seconds; with the line always in view and a breeze every so
+/// often, that kept the processor busy. Here each swing is worked out once,
+/// as a spring curve sampled into keyframes, and handed to Core Animation,
+/// which turns the photo's layer on its own. The app does nothing per frame.
+@MainActor
+final class Sway {
+    fileprivate weak var view: SwayView?
+
+    /// The curve playing now, in degrees, clockwise as SwiftUI counts, so
+    /// a new swing can start from where the photo is instead of jumping.
+    private var samples: [Double] = []
+    private var start: CFTimeInterval = 0
+    private var holdsLast = false
+    private static let step = 1.0 / 30
+
+    /// Where the swing is now, in degrees.
+    var angle: Double {
+        guard !samples.isEmpty else { return 0 }
+        let t = (CACurrentMediaTime() - start) / Self.step
+        if t >= Double(samples.count - 1) { return holdsLast ? samples.last! : 0 }
+        let i = Int(t), f = t - Double(i)
+        return samples[i] + (samples[i + 1] - samples[i]) * f
+    }
+
+    /// A little push: out to `degrees` and back, settling like a pendulum.
+    func nudge(_ degrees: Double) {
+        let from = angle
+        let out = Self.ease(from: from, to: degrees, duration: 0.3)
+        play(out + Self.spring(from: degrees, stiffness: 38, damping: 2.4).dropFirst())
+    }
+
+    /// Swings back to rest from `degrees`.
+    func spring(from degrees: Double, stiffness: Double, damping: Double) {
+        play(Self.spring(from: degrees, stiffness: stiffness, damping: damping))
+    }
+
+    /// While the photo is being slid, it leans behind the pin.
+    func follow(_ degrees: Double) {
+        play(Self.ease(from: angle, to: degrees, duration: 0.18), hold: true)
+    }
+
+    /// Let go after a slide: back to rest.
+    func settle() {
+        spring(from: angle, stiffness: 38, damping: 2.4)
+    }
+
+    private func play(_ curve: [Double], hold: Bool = false) {
+        samples = curve
+        start = CACurrentMediaTime()
+        holdsLast = hold
+        view?.play(curve, step: Self.step, hold: hold)
+    }
+
+    // MARK: Curves
+
+    private static func ease(from a: Double, to b: Double, duration: Double) -> [Double] {
+        let n = max(2, Int(duration / step))
+        return (0...n).map { i in
+            let t = Double(i) / Double(n)
+            return a + (b - a) * (1 - (1 - t) * (1 - t))
+        }
+    }
+
+    /// A damped spring released from `a` at rest, until it is still.
+    private static func spring(from a: Double, stiffness k: Double, damping c: Double) -> [Double] {
+        guard abs(a) > 0.01 else { return [0] }
+        let wd = (k - c * c / 4).squareRoot()
+        let decay = c / 2
+        let duration = min(6, Foundation.log(abs(a) / 0.03) / decay)
+        let n = max(2, Int(duration / step))
+        return (0...n).map { i in
+            let t = Double(i) * step
+            return a * exp(-decay * t) * (cos(wd * t) + decay / wd * sin(wd * t))
+        } + [0]
+    }
+}
+
+/// Hosts one photo's SwiftUI view in its own layer, so Core Animation can
+/// turn it about the pin. It also reports where the card is, which the
+/// panel uses to only catch clicks over photos.
+struct SwayHost<Content: View>: NSViewRepresentable {
+    static var space: String { "sway" }
+    let id: UUID
+    let sway: Sway
+    let line: Line
+    @ViewBuilder let content: () -> Content
+
+    func makeNSView(context: Context) -> SwayView {
+        let view = SwayView(id: id, line: line)
+        sway.view = view
+        view.setRoot(root)
+        return view
+    }
+
+    func updateNSView(_ view: SwayView, context: Context) {
+        sway.view = view
+        view.setRoot(root)
+    }
+
+    static func dismantleNSView(_ view: SwayView, coordinator: ()) {
+        view.forget()
+    }
+
+    private var root: AnyView {
+        AnyView(content().coordinateSpace(name: Self.space))
+    }
+}
+
+@MainActor
+final class SwayView: NSView {
+    private let id: UUID
+    private let line: Line
+    private var host: NSHostingView<AnyView>?
+    /// The card's rect inside this view, y down, as the card reported it.
+    private var cardRect: CGRect?
+
+    init(id: UUID, line: Line) {
+        self.id = id
+        self.line = line
+        super.init(frame: .zero)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func setRoot(_ root: AnyView) {
+        let wrapped = AnyView(root.onPreferenceChange(HitRectsKey.self) { [weak self] rects in
+            MainActor.assumeIsolated { self?.cardMoved(rects) }
+        })
+        if let host {
+            host.rootView = wrapped
+        } else {
+            let host = NSHostingView(rootView: wrapped)
+            host.sizingOptions = []
+            host.frame = bounds
+            host.autoresizingMask = [.width, .height]
+            addSubview(host)
+            self.host = host
+        }
+    }
+
+    // MARK: Where the card is
+
+    private func cardMoved(_ rects: [UUID: CGRect]) {
+        cardRect = rects[id]
+        report()
+    }
+
+    override func setFrameOrigin(_ newOrigin: NSPoint) {
+        super.setFrameOrigin(newOrigin)
+        report()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        report()
+    }
+
+    /// Converts the card's rect to the panel's coordinates, y down from the
+    /// top, the way the panel reads them.
+    private func report() {
+        guard let host, let window, let content = window.contentView else { return }
+        guard let r = cardRect else {
+            line.hitRects[id] = nil
+            return
+        }
+        let inWindow = host.convert(r, to: nil)
+        line.hitRects[id] = CGRect(x: inWindow.minX, y: content.bounds.height - inWindow.maxY,
+                                   width: inWindow.width, height: inWindow.height)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        report()
+    }
+
+    func forget() {
+        line.hitRects[id] = nil
+    }
+
+    // MARK: Swinging
+
+    /// Turns the view about the middle of its top edge, where the pin is.
+    func play(_ degrees: [Double], step: Double, hold: Bool) {
+        guard let layer, degrees.count > 1 else {
+            layer?.removeAnimation(forKey: "sway")
+            return
+        }
+        let w = bounds.width, h = bounds.height
+        // The pivot in the layer's own space, whatever its anchor point is.
+        let px = w / 2 - layer.anchorPoint.x * w
+        let py = h - layer.anchorPoint.y * h
+        let values = degrees.map { d -> NSValue in
+            // SwiftUI turns clockwise for positive angles; Core Animation,
+            // with y up, the other way.
+            var t = CATransform3DMakeTranslation(px, py, 0)
+            t = CATransform3DRotate(t, CGFloat(-d * .pi / 180), 0, 0, 1)
+            t = CATransform3DTranslate(t, -px, -py, 0)
+            return NSValue(caTransform3D: t)
+        }
+        let a = CAKeyframeAnimation(keyPath: "transform")
+        a.values = values
+        a.calculationMode = .linear
+        a.duration = step * Double(degrees.count - 1)
+        if hold {
+            a.fillMode = .forwards
+            a.isRemovedOnCompletion = false
+        }
+        if #available(macOS 12.0, *) {
+            a.preferredFrameRateRange = CAFrameRateRange(minimum: 24, maximum: 30, preferred: 30)
+        }
+        layer.add(a, forKey: "sway")
+    }
+}

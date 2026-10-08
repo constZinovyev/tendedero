@@ -85,10 +85,12 @@ final class GarlandLayers {
 
     /// Rebuilds every garland. `origin` is the screen's origin in global
     /// coordinates, so a garland is drawn where it belongs on this screen.
-    func render(_ garlands: [Garland], style: GarlandStyle, origin: CGPoint, scale: CGFloat) {
+    /// `size` is the area to draw in: cached parts are flattened to it.
+    func render(_ garlands: [Garland], style: GarlandStyle, origin: CGPoint, size: CGSize, scale: CGFloat) {
         self.scale = scale
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        root.frame = CGRect(origin: .zero, size: size)
         root.sublayers?.forEach { $0.removeFromSuperlayer() }
         // One shared start time keeps every blinking garland in step.
         let now = CACurrentMediaTime()
@@ -99,9 +101,14 @@ final class GarlandLayers {
     }
 
     private func layer(for g: Garland, origin: CGPoint, style: GarlandStyle, now: CFTimeInterval) -> CALayer {
+        // Cached layers are flattened within their bounds, so every
+        // container spans the whole area.
         let container = CALayer()
+        container.frame = root.bounds
         let fixed = CALayer()
+        fixed.frame = root.bounds
         let light = CALayer()
+        light.frame = root.bounds
         let bulbs = bulbSprites(style)
         let geo = GarlandGeometry(g)
         let local = geo.points.map { CGPoint(x: $0.x - origin.x, y: $0.y - origin.y) }
@@ -134,19 +141,38 @@ final class GarlandLayers {
             }
             let attach = CGPoint(x: p.x, y: p.y - style.lead)
             fixed.addSublayer(Sprite.layer(bulbs.off, rect: bulbs.rect, at: attach, scale: scale))
+            if g.bulbsOff.contains(i) || g.mode == .off { continue }
             let lit = Sprite.layer(bulbs.on, rect: bulbs.rect, at: attach, scale: scale)
             lit.opacity = Float(g.brightness)
-            if g.bulbsOff.contains(i) || g.mode == .off {
-                continue
-            } else if let animation = animation(for: g, bulb: i, now: now) {
-                lit.add(animation, forKey: "light")
-            }
             light.addSublayer(lit)
         }
-        // Everything that never changes is cached as one bitmap; only the
-        // lit bulbs above it are composited when they fade.
+        // The dark garland and the lit bulbs are each cached as one bitmap.
+        // The light then moves as a whole: one animation per garland, not
+        // one per bulb. Blinking fades the lit bitmap in and out; the wave
+        // slides a soft striped mask across it.
         fixed.shouldRasterize = true
         fixed.rasterizationScale = scale
+        light.shouldRasterize = true
+        light.rasterizationScale = scale
+        switch g.mode {
+        case .on, .off:
+            break
+        case .blink:
+            light.add(blink(g, now: now), forKey: "light")
+        case .wave:
+            // The mask moves every frame, so it sits on a plain layer around
+            // the cached one; on the cached layer itself it would force the
+            // bitmap to be redrawn each frame.
+            if let mask = waveMask(g, bulbs: positions, in: light.bounds, now: now) {
+                let masked = CALayer()
+                masked.frame = root.bounds
+                masked.addSublayer(light)
+                masked.mask = mask
+                container.addSublayer(fixed)
+                container.addSublayer(masked)
+                return container
+            }
+        }
         container.addSublayer(fixed)
         container.addSublayer(light)
         return container
@@ -290,39 +316,47 @@ final class GarlandLayers {
         return layer
     }
 
-    /// The repeating light of a blinking or waving garland, scaled by its
-    /// brightness. Every bulb starts from the same moment; the wave offsets
-    /// each one by its lag behind the previous bulb.
-    private func animation(for g: Garland, bulb i: Int, now: CFTimeInterval) -> CAAnimation? {
-        let b = g.brightness
-        switch g.mode {
-        case .on, .off:
-            return nil
-        case .blink:
-            let a = CAKeyframeAnimation(keyPath: "opacity")
-            a.values = GarlandLight.blinkValues.map { $0 * b }
-            a.keyTimes = GarlandLight.blinkTimes.map { NSNumber(value: $0) }
-            a.duration = GarlandLight.blinkPeriod / g.speed
-            a.repeatCount = .infinity
-            a.beginTime = now
-            a.isRemovedOnCompletion = false
-            a.calm()
-            return a
-        case .wave:
-            let period = 2 * .pi / (GarlandLight.waveRate * g.speed)
-            let steps = 24
-            let a = CAKeyframeAnimation(keyPath: "opacity")
-            a.values = (0...steps).map { GarlandLight.wave(phase: 2 * .pi * Double($0) / Double(steps)) * b }
-            a.calculationMode = .linear
-            a.duration = period
-            a.repeatCount = .infinity
-            a.beginTime = now
-            // Bulb i lags by i * waveLag radians of the cycle.
-            let lag = Double(i) * GarlandLight.waveLag / (2 * .pi) * period
-            a.timeOffset = period - lag.truncatingRemainder(dividingBy: period)
-            a.isRemovedOnCompletion = false
-            a.calm()
-            return a
+    /// All bulbs going out and lighting up again together.
+    private func blink(_ g: Garland, now: CFTimeInterval) -> CAAnimation {
+        let a = CAKeyframeAnimation(keyPath: "opacity")
+        a.values = GarlandLight.blinkValues
+        a.keyTimes = GarlandLight.blinkTimes.map { NSNumber(value: $0) }
+        a.duration = GarlandLight.blinkPeriod / g.speed
+        a.repeatCount = .infinity
+        a.beginTime = now
+        a.isRemovedOnCompletion = false
+        a.calm()
+        return a
+    }
+
+    /// The running wave as one mask: soft bright stripes, one wavelength
+    /// apart, sliding along the garland by one wavelength per cycle. The
+    /// wavelength is where bulb i lags its neighbour by `waveLag`, so it
+    /// matches the per-bulb wave it replaces.
+    private func waveMask(_ g: Garland, bulbs: [CGPoint], in bounds: CGRect, now: CFTimeInterval) -> CALayer? {
+        guard bulbs.count > 1, let first = bulbs.first, let last = bulbs.last else { return nil }
+        let rightward = last.x >= first.x
+        let perBulb = max(4, abs(last.x - first.x) / CGFloat(bulbs.count - 1))
+        let lambda = perBulb * 2 * .pi / CGFloat(GarlandLight.waveLag)
+        let periods = Int((bounds.width / lambda).rounded(.up)) + 2
+        let perPeriod = 16
+        let n = periods * perPeriod
+        let mask = CAGradientLayer()
+        mask.frame = CGRect(x: bounds.minX - lambda, y: bounds.minY, width: lambda * CGFloat(periods), height: bounds.height)
+        mask.startPoint = CGPoint(x: 0, y: 0.5)
+        mask.endPoint = CGPoint(x: 1, y: 0.5)
+        mask.colors = (0...n).map { j in
+            let phase = 2 * Double.pi * Double(j) / Double(perPeriod) * (rightward ? -1 : 1)
+            return NSColor(white: 0, alpha: GarlandLight.wave(phase: phase)).cgColor
         }
+        let a = CABasicAnimation(keyPath: "position.x")
+        a.byValue = rightward ? lambda : -lambda
+        a.duration = 2 * .pi / (GarlandLight.waveRate * g.speed)
+        a.repeatCount = .infinity
+        a.beginTime = now
+        a.isRemovedOnCompletion = false
+        a.calm()
+        mask.add(a, forKey: "wave")
+        return mask
     }
 }

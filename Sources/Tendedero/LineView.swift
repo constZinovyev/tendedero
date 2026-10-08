@@ -42,7 +42,9 @@ struct LineView: View {
                 ForEach(line.items) { item in
                     let x = CGFloat(item.position) * width
                     let ropeY = Layout.ropeY(x: x, width: width)
-                    PeggedView(item: item, line: line)
+                    SwayHost(id: item.id, sway: line.sway(item.id), line: line) {
+                        PeggedView(item: item, line: line)
+                    }
                         .frame(width: Layout.cardWidth, height: Layout.panelHeight - ropeY, alignment: .top)
                         .position(x: x, y: ropeY - Layout.pinAbove + (Layout.panelHeight - ropeY) / 2)
                         .zIndex(line.slidingID == item.id ? 1 : 0)
@@ -56,9 +58,8 @@ struct LineView: View {
             .animation(line.revealed ? .spring(response: 0.42, dampingFraction: 0.82)
                                      : .easeIn(duration: 0.22), value: line.revealed)
         }
-        .onPreferenceChange(HitRectsKey.self) { rects in
-            line.hitRects = rects
-        }
+        // Each photo reports where its card is itself, from its own host
+        // (see SwayView), since it lives in a view of its own.
     }
 }
 
