@@ -92,6 +92,7 @@ private final class Session {
     private let target: CGRect
     private var monitors: [Any] = []
     private var timer: Timer?
+    private var hoveredCorner: PreviewStage.Corner?
 
     init(image: NSImage, screen: NSScreen, card: @escaping () -> CGRect?, start: CGRect?, target: CGRect, tilt: Double) {
         self.screen = screen
@@ -158,13 +159,37 @@ private final class Session {
     }
 
     /// The window only takes the mouse over the photo and its corners, and
-    /// the cross shows while the pointer is there. While you move or resize
-    /// it, it keeps the mouse whatever the pointer does.
+    /// the cross shows while the pointer is there. Over a corner the pointer
+    /// turns into resize arrows. While you move or resize it, it keeps the
+    /// mouse whatever the pointer does.
+    ///
+    /// The cursor is set here rather than on hover: the window belongs to an
+    /// app in the background, and macOS resets the cursor on every move.
     private func trackMouse() {
-        guard !model.interacting else { return }
-        let over = NSMouseInRect(NSEvent.mouseLocation, current.insetBy(dx: -PreviewStage.grip, dy: -PreviewStage.grip), false)
+        if model.interacting {
+            model.activeCorner?.cursor.set()
+            // So the arrows give way to the normal pointer if the drag ends off the corner.
+            hoveredCorner = model.activeCorner
+            return
+        }
+        let mouse = NSEvent.mouseLocation
+        let rect = current
+        let half = PreviewStage.handle / 2
+        let over = NSMouseInRect(mouse, rect.insetBy(dx: -half, dy: -half), false)
         if panel.ignoresMouseEvents == over { panel.ignoresMouseEvents = !over }
         if model.hovering != over { model.hovering = over }
+
+        let corner = over ? PreviewStage.Corner.allCases.first { c in
+            // SwiftUI's y grows downward; the screen's grows upward.
+            let p = CGPoint(x: c.sx > 0 ? rect.maxX : rect.minX, y: c.sy > 0 ? rect.minY : rect.maxY)
+            return abs(mouse.x - p.x) <= half && abs(mouse.y - p.y) <= half
+        } : nil
+        if let corner {
+            corner.cursor.set()
+        } else if hoveredCorner != nil {
+            NSCursor.arrow.set()
+        }
+        hoveredCorner = corner
     }
 
     /// Flies back into the card, or fades where it is when the card is not
@@ -176,6 +201,7 @@ private final class Session {
         monitors.removeAll()
         panel.ignoresMouseEvents = true
         model.hovering = false
+        if hoveredCorner != nil || model.activeCorner != nil { NSCursor.arrow.set() }
         guard let animation else {
             panel.orderOut(nil)
             return
@@ -212,6 +238,8 @@ private final class PreviewModel: ObservableObject {
     @Published var hovering = false
     /// Being moved or resized.
     var interacting = false
+    /// The corner being dragged, so its arrows stay while resizing.
+    var activeCorner: PreviewStage.Corner?
     var maxSize: CGSize = .zero
     var onClose: () -> Void = {}
 
@@ -251,9 +279,10 @@ private struct PreviewStage: View {
     @ObservedObject var model: PreviewModel
     @State private var startRect: CGRect?
 
-    /// How far outside the photo a corner can be caught. The corner handle
-    /// is a square twice this size, centered on the corner.
-    static let grip: CGFloat = 20
+    /// The side of the square around each corner that resizes the photo,
+    /// half inside the frame and half outside: easy to find without
+    /// reaching for the very edge, small enough to leave the photo for moving.
+    static let handle: CGFloat = 30
     static let minWidth: CGFloat = 180
 
     var body: some View {
@@ -262,19 +291,18 @@ private struct PreviewStage: View {
             PreviewCard(image: model.image, width: r.width, hovering: model.hovering, onClose: model.onClose)
                 .frame(width: r.width, height: r.height)
                 .rotationEffect(.degrees(model.tilt), anchor: .top)
+                // Gestures go before .position, which fills the whole screen:
+                // after it they would catch drags anywhere.
+                .gesture(move)
                 .position(x: r.midX, y: r.midY)
                 .opacity(model.opacity)
-                .gesture(move)
 
             ForEach(Corner.allCases, id: \.self) { corner in
                 Color.clear
-                    .frame(width: Self.grip * 2, height: Self.grip * 2)
+                    .frame(width: Self.handle, height: Self.handle)
                     .contentShape(Rectangle())
-                    .position(x: corner.sx > 0 ? r.maxX : r.minX, y: corner.sy > 0 ? r.maxY : r.minY)
-                    .onHover { inside in
-                        if inside { corner.cursor.set() } else if !model.interacting { NSCursor.arrow.set() }
-                    }
                     .gesture(resize(corner))
+                    .position(x: corner.sx > 0 ? r.maxX : r.minX, y: corner.sy > 0 ? r.maxY : r.minY)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -293,6 +321,7 @@ private struct PreviewStage: View {
     private func end() {
         startRect = nil
         model.interacting = false
+        model.activeCorner = nil
     }
 
     private var move: some Gesture {
@@ -309,6 +338,7 @@ private struct PreviewStage: View {
         DragGesture(minimumDistance: 1, coordinateSpace: .global)
             .onChanged { v in
                 let s = begin()
+                model.activeCorner = corner
                 let byX = s.width + corner.sx * v.translation.width
                 let byY = (s.height + corner.sy * v.translation.height) * s.width / s.height
                 let limit = min(model.maxSize.width, model.maxSize.height * s.width / s.height)
@@ -318,10 +348,7 @@ private struct PreviewStage: View {
                                     y: corner.sy > 0 ? s.minY : s.maxY - h,
                                     width: w, height: h)
             }
-            .onEnded { _ in
-                end()
-                NSCursor.arrow.set()
-            }
+            .onEnded { _ in end() }
     }
 
     enum Corner: CaseIterable {
