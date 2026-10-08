@@ -585,6 +585,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let mainOnly = ClosureMenuItem(L("Main screen only", "Solo en la pantalla principal")) { [weak self] in
             Placement.mainScreenOnly.toggle()
             self?.moveLine()
+            self?.garlands.refresh()
         }
         mainOnly.state = Placement.mainScreenOnly ? .on : .off
         mainOnly.toolTip = L("The line hangs only on the screen with the Dock",

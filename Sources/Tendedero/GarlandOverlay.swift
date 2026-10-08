@@ -29,13 +29,14 @@ final class GarlandController {
         refresh()
     }
 
-    private func refresh() {
+    /// Garlands hang on the screens the line may come down on.
+    func refresh() {
         // objectWillChange fires before the change lands; draw after it.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             let show = self.store.visible || self.store.editing
             for overlay in self.overlays {
-                if show && (!self.store.items.isEmpty || self.store.editing) {
+                if show && Placement.allows(overlay.home) && (!self.store.items.isEmpty || self.store.editing) {
                     overlay.refreshGarlands()
                     overlay.orderFrontRegardless()
                 } else {
@@ -47,14 +48,19 @@ final class GarlandController {
 
     func toggleEditing() {
         store.editing.toggle()
-        if store.editing, let overlay = overlays.first(where: { $0.screen == LinePanel.screenUnderPointer() }) {
+        if store.editing, let overlay = overlays.first(where: { $0.home == Self.lineScreen }) {
             overlay.makeKey()
         }
     }
 
     func add() {
         store.editing = true
-        store.add(on: LinePanel.screenUnderPointer())
+        store.add(on: Self.lineScreen)
+    }
+
+    /// The screen the line hangs on now, or would come down on.
+    private static var lineScreen: NSScreen? {
+        Placement.mainScreenOnly ? Placement.mainScreen : LinePanel.screenUnderPointer()
     }
 
     /// The Garlands submenu of the status item.
@@ -84,13 +90,6 @@ final class GarlandController {
         menu.addItem(allOff)
 
         menu.addItem(.separator())
-        let behind = ClosureMenuItem(L("Behind windows", "Detrás de las ventanas")) { [weak self] in
-            guard let self else { return }
-            self.store.behindWindows.toggle()
-        }
-        behind.state = store.behindWindows ? .on : .off
-        menu.addItem(behind)
-
         let look = NSMenuItem(title: L("Appearance", "Aspecto"), action: nil, keyEquivalent: "")
         look.submenu = appearanceMenu()
         menu.addItem(look)
@@ -158,10 +157,13 @@ final class GarlandController {
 @MainActor
 final class GarlandOverlay: NSPanel {
     let store: Garlands
+    /// The screen this window covers.
+    let home: NSScreen
     private let view: GarlandEditView
 
     init(screen: NSScreen, store: Garlands) {
         self.store = store
+        home = screen
         view = GarlandEditView(store: store, screenFrame: screen.frame)
         super.init(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
@@ -183,11 +185,13 @@ final class GarlandOverlay: NSPanel {
     func refreshGarlands() {
         let editing = store.editing
         ignoresMouseEvents = !editing
-        level = editing || !store.behindWindows
-            ? .floating
-            : NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
+        level = editing ? .floating : Self.background
         view.reload()
     }
+
+    /// Just above the wallpaper: under the desktop icons, every window and
+    /// the line with its photos, even when the line itself hangs behind windows.
+    static let background = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1)
 
     override func cancelOperation(_ sender: Any?) {
         if store.editing { store.editing = false }
@@ -325,7 +329,12 @@ final class GarlandEditView: NSView {
         case .end(let id):
             store.update(id, save: false) { $0.end = p }
         case .sag(let id):
-            store.update(id, save: false) { g in g.sag = (g.start.y + g.end.y) / 2 - p.y }
+            // The middle handle moves down for depth and sideways to shift
+            // the lowest part towards one end.
+            store.update(id, save: false) { g in
+                g.sag = (g.start.y + g.end.y) / 2 - p.y
+                g.shift = p.x - (g.start.x + g.end.x) / 2
+            }
         case .bulb(let id, _):
             // Dragging from a bulb moves the whole garland, like the wire.
             guard let g = store.items.first(where: { $0.id == id }) else { return }

@@ -12,6 +12,9 @@ struct Garland: Codable, Identifiable, Equatable {
     var end: CGPoint
     /// How far the middle hangs below the straight line between the ends.
     var sag: CGFloat = 45
+    /// How far the lowest part is pulled sideways from the middle, so the
+    /// garland can hang lower towards one end.
+    var shift: CGFloat = 0
     /// Distance between bulbs along the wire.
     var spacing: CGFloat = 44
     var brightness: Double = 0.85
@@ -43,6 +46,30 @@ struct Garland: Codable, Identifiable, Equatable {
 
     static let spacingRange: ClosedRange<CGFloat> = 14...90
     static let speedRange: ClosedRange<Double> = 0.2...3
+
+    /// The sideways pull is limited so the curve never folds back on itself.
+    var maxShift: CGFloat { abs(end.x - start.x) * 0.45 }
+
+    init(start: CGPoint, end: CGPoint) {
+        self.start = start
+        self.end = end
+    }
+
+    /// Garlands saved before a setting existed get its default.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Garland(start: .zero, end: .zero)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        start = try c.decode(CGPoint.self, forKey: .start)
+        end = try c.decode(CGPoint.self, forKey: .end)
+        sag = try c.decodeIfPresent(CGFloat.self, forKey: .sag) ?? d.sag
+        shift = try c.decodeIfPresent(CGFloat.self, forKey: .shift) ?? d.shift
+        spacing = try c.decodeIfPresent(CGFloat.self, forKey: .spacing) ?? d.spacing
+        brightness = try c.decodeIfPresent(Double.self, forKey: .brightness) ?? d.brightness
+        mode = try c.decodeIfPresent(Mode.self, forKey: .mode) ?? d.mode
+        speed = try c.decodeIfPresent(Double.self, forKey: .speed) ?? d.speed
+        bulbsOff = try c.decodeIfPresent(Set<Int>.self, forKey: .bulbsOff) ?? d.bulbsOff
+    }
 }
 
 // MARK: Geometry
@@ -57,9 +84,9 @@ struct GarlandGeometry {
 
     var length: CGFloat { lengths.last ?? 0 }
 
-    /// The wire hangs as a parabola: a quadratic curve whose control point
-    /// sits twice the sag below the middle, so the lowest point of the curve
-    /// is exactly `sag` below the line between the ends.
+    /// The wire hangs as a parabola: a quadratic curve that passes through
+    /// the middle handle, `sag` below and `shift` aside from the middle of the
+    /// line between the ends. Its control point is twice that offset away.
     init(_ g: Garland, samples: Int = 240) {
         let control = Self.control(for: g)
         var pts: [CGPoint] = []
@@ -79,12 +106,12 @@ struct GarlandGeometry {
     }
 
     static func control(for g: Garland) -> CGPoint {
-        CGPoint(x: (g.start.x + g.end.x) / 2, y: (g.start.y + g.end.y) / 2 - 2 * g.sag)
+        CGPoint(x: (g.start.x + g.end.x) / 2 + 2 * g.shift, y: (g.start.y + g.end.y) / 2 - 2 * g.sag)
     }
 
     /// The middle of the curve, where the sag handle sits while editing.
     static func middle(of g: Garland) -> CGPoint {
-        CGPoint(x: (g.start.x + g.end.x) / 2, y: (g.start.y + g.end.y) / 2 - g.sag)
+        CGPoint(x: (g.start.x + g.end.x) / 2 + g.shift, y: (g.start.y + g.end.y) / 2 - g.sag)
     }
 
     /// The unit normal at a sample, used to twist the strands around the wire.
@@ -173,15 +200,6 @@ final class Garlands: ObservableObject {
         }
     }
 
-    /// On the desktop, under every window, or floating over them.
-    var behindWindows: Bool {
-        get { UserDefaults.standard.object(forKey: "garlandsBehindWindows") as? Bool ?? true }
-        set {
-            UserDefaults.standard.set(newValue, forKey: "garlandsBehindWindows")
-            objectWillChange.send()
-        }
-    }
-
     private let storeKey = "garlands"
     private let styleKey = "garlandStyle"
 
@@ -226,6 +244,8 @@ final class Garlands: ObservableObject {
         items[i].speed = min(max(items[i].speed, Garland.speedRange.lowerBound), Garland.speedRange.upperBound)
         items[i].brightness = min(max(items[i].brightness, 0), 1)
         items[i].sag = max(0, items[i].sag)
+        let limit = items[i].maxShift
+        items[i].shift = min(max(items[i].shift, -limit), limit)
         if shouldSave { save() }
     }
 
