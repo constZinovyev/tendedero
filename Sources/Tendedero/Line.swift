@@ -42,6 +42,8 @@ final class Line: ObservableObject {
     /// Card frames in window coordinates, reported by the views. The panel
     /// uses them to only catch clicks over photos and let the rest through.
     var hitRects: [UUID: CGRect] = [:]
+    /// A card's frame on screen as it hangs right now, from the panel.
+    var cardScreenFrame: ((UUID) -> CGRect?)?
 
     /// The line's width in points, kept up to date by the panel.
     var width: CGFloat = 1440
@@ -194,7 +196,8 @@ final class Line: ObservableObject {
     /// as it is and no other app opens.
     func show(_ id: UUID) {
         guard let item = items.first(where: { $0.id == id }) else { return }
-        PhotoPreview.shared.show(item.url, on: LinePanel.screenUnderPointer())
+        PhotoPreview.shared.show(item.url, from: { [weak self] in self?.cardScreenFrame?(id) }, tilt: item.tilt,
+                                 on: LinePanel.screenUnderPointer())
     }
 
     func open(_ id: UUID) {

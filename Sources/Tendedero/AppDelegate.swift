@@ -78,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         Markup.shared.onSaved = { [weak self] url in self?.line.reloadThumbnail(for: url) }
         line.onFall = { [weak self] item in self?.fall(item) }
+        line.cardScreenFrame = { [weak self] id in self?.hangingFrame(for: id) }
 
         line.$items
             .receive(on: RunLoop.main)
@@ -252,6 +253,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
               let card = cardFrame(for: item.id),
               let image = item.thumb.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
         CaptureFlight.fall(image: image, card: card, tilt: CGFloat(item.tilt), on: screen)
+    }
+
+    /// Where a card hangs right now, in screen coordinates, as the view
+    /// reported it. Only while the line is down.
+    private func hangingFrame(for id: UUID) -> CGRect? {
+        guard isRevealed, let r = line.hitRects[id] else { return nil }
+        return CGRect(x: panel.frame.minX + r.minX, y: panel.frame.maxY - r.maxY,
+                      width: r.width, height: r.height)
     }
 
     /// Where a card will hang, in screen coordinates, using the same layout

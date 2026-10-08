@@ -1,81 +1,226 @@
 import AppKit
+import Combine
 import SwiftUI
 
-/// A large look at one photo, floating in the middle of the screen. It is
-/// only for looking: no editing, no other app. A click anywhere, Escape or
-/// Space puts it away.
+/// A large look at one photo. The card on the line grows into it: it opens
+/// below the card, lined up with it, in the same glass frame, only bigger.
+/// It is only for looking: no editing, no other app. Drag it to move it, drag
+/// a corner to resize it. The cross, a click elsewhere, Escape or Space sends
+/// it back to the line.
 @MainActor
 final class PhotoPreview {
     static let shared = PhotoPreview()
 
     /// The share of the screen the photo may fill, in each direction.
-    static var screenFraction: CGFloat = 0.7
+    static var screenFraction: CGFloat = 0.55
     /// Small screenshots are enlarged, but not so much that they blur.
     static let maxScale: CGFloat = 2
+    /// How far below the card's top the preview opens, in points.
+    static var drop: CGFloat = 90
 
-    private var panel: PreviewPanel?
-    private var monitors: [Any] = []
+    private static let open = Animation.spring(response: 0.42, dampingFraction: 0.84)
+    private static let shut = Animation.spring(response: 0.34, dampingFraction: 0.95)
 
-    func show(_ url: URL, on screen: NSScreen?) {
-        close(animated: false)
-        guard let image = NSImage(contentsOf: url),
-              let visible = (screen ?? NSScreen.main)?.visibleFrame,
+    private var session: Session?
+
+    /// - Parameters:
+    ///   - card: the hanging card's frame in screen coordinates while it is in
+    ///     view. Asked again on closing, so the preview goes back to where the
+    ///     card hangs then.
+    ///   - tilt: the card's tilt in degrees, so the preview leaves it at the same angle.
+    func show(_ url: URL, from card: @escaping () -> CGRect?, tilt: Double, on screen: NSScreen?) {
+        session?.close(animation: nil)
+        session = nil
+        guard let screen = screen ?? NSScreen.main,
+              let image = NSImage(contentsOf: url),
               image.size.width > 0, image.size.height > 0 else { return }
 
-        let box = CGSize(width: visible.width * Self.screenFraction, height: visible.height * Self.screenFraction)
-        let scale = min(box.width / image.size.width, box.height / image.size.height, Self.maxScale)
-        let size = CGSize(width: (image.size.width * scale).rounded(), height: (image.size.height * scale).rounded())
-        let frame = NSRect(x: (visible.midX - size.width / 2).rounded(), y: (visible.midY - size.height / 2).rounded(),
-                           width: size.width, height: size.height)
-
-        let panel = PreviewPanel(frame: frame)
-        panel.contentView = NSHostingView(rootView: PreviewView(image: image))
-        panel.onDismiss = { [weak self] in self?.close() }
-        panel.alphaValue = 0
-        panel.makeKeyAndOrderFront(nil)
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.18
-            panel.animator().alphaValue = 1
+        let start = card().flatMap { $0.intersects(screen.frame) ? $0 : nil }
+        let target = Self.target(for: image.size, near: start, on: screen)
+        let session = Session(image: image, screen: screen, card: card, start: start, target: target, tilt: tilt)
+        session.onDismiss = { [weak self, weak session] in
+            guard let self, let session, self.session === session else { return }
+            self.close()
         }
-        self.panel = panel
+        self.session = session
+        session.present(with: Self.open)
+    }
 
-        // Any click puts it away, in another app or on the line. The click
-        // still goes through, so clicking another photo copies it as usual.
+    /// Sends the photo back to where it came from.
+    func close() {
+        session?.close(animation: Self.shut)
+        session = nil
+    }
+
+    /// The frame the preview opens in: the photo fitted in a share of the
+    /// screen, below the card and lined up with it the way the card sits on
+    /// the screen. A card on the right keeps its right edge, so the preview
+    /// grows to the left; one in the middle grows evenly; one on the left
+    /// grows to the right. Always kept inside the screen.
+    private static func target(for size: CGSize, near card: CGRect?, on screen: NSScreen) -> CGRect {
+        let visible = screen.visibleFrame
+        let box = CGSize(width: visible.width * screenFraction, height: visible.height * screenFraction)
+        let photoScale = min(box.width / size.width, box.height / size.height, maxScale)
+        let photo = CGSize(width: size.width * photoScale, height: size.height * photoScale)
+        let inset = PreviewCard.inset(forWidth: photo.width)
+        let w = (photo.width + inset * 2).rounded(), h = (photo.height + inset * 2).rounded()
+
+        var x = visible.midX - w / 2, y = visible.midY - h / 2
+        if let card {
+            let a = min(max((card.midX - visible.minX) / visible.width, 0), 1)
+            x = card.minX + a * card.width - a * w
+            y = card.maxY - drop - h
+        }
+        let margin: CGFloat = 24
+        x = min(max(x, visible.minX + margin), visible.maxX - margin - w)
+        y = min(max(y, visible.minY + margin), visible.maxY - margin - h)
+        return CGRect(x: x.rounded(), y: y.rounded(), width: w, height: h)
+    }
+}
+
+/// One preview on screen: a transparent window over the whole screen, so
+/// the card can travel from the line and be moved anywhere without being
+/// cut off. It lets clicks through everywhere except over the photo.
+@MainActor
+private final class Session {
+    var onDismiss: () -> Void = {}
+
+    private let panel: PreviewPanel
+    private let model: PreviewModel
+    private let screen: NSScreen
+    private let card: () -> CGRect?
+    private let target: CGRect
+    private var monitors: [Any] = []
+    private var timer: Timer?
+
+    init(image: NSImage, screen: NSScreen, card: @escaping () -> CGRect?, start: CGRect?, target: CGRect, tilt: Double) {
+        self.screen = screen
+        self.card = card
+        self.target = target
+        model = PreviewModel(image: image)
+        model.maxSize = screen.visibleFrame.size
+        panel = PreviewPanel(frame: screen.frame)
+        panel.contentView = NSHostingView(rootView: PreviewStage(model: model))
+        panel.onDismiss = { [weak self] in self?.onDismiss() }
+        model.onClose = { [weak self] in self?.onDismiss() }
+
+        if let start {
+            model.rect = local(start)
+            model.tilt = tilt
+        } else {
+            // Nothing to grow from: it appears in place, slightly small.
+            let t = local(target)
+            model.rect = t.insetBy(dx: t.width * 0.04, dy: t.height * 0.04)
+            model.opacity = 0
+        }
+    }
+
+    /// Screen coordinates to the window's, which SwiftUI measures from the top.
+    private func local(_ r: CGRect) -> CGRect {
+        CGRect(x: r.minX - screen.frame.minX, y: screen.frame.maxY - r.maxY, width: r.width, height: r.height)
+    }
+
+    /// And back: where the photo is on screen now.
+    private var current: CGRect {
+        let r = model.rect
+        return CGRect(x: r.minX + screen.frame.minX, y: screen.frame.maxY - r.maxY, width: r.width, height: r.height)
+    }
+
+    func present(with animation: Animation) {
+        panel.makeKeyAndOrderFront(nil)
+        withAnimation(animation) {
+            model.rect = local(target)
+            model.tilt = 0
+            model.opacity = 1
+        }
+
+        // A click anywhere but on the photo sends it back. Those clicks still
+        // go through, so clicking another card copies it as usual.
         let dismiss: (NSEvent?) -> Void = { [weak self] _ in
-            MainActor.assumeIsolated { self?.close() }
+            MainActor.assumeIsolated { self?.onDismiss() }
         }
         if let global = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: dismiss) {
             monitors.append(global)
         }
+        let panel = panel
         if let local = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: { e in
-            dismiss(e)
+            if e.window !== panel { dismiss(e) }
             return e
         }) {
             monitors.append(local)
         }
+
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.trackMouse() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
-    func close(animated: Bool = true) {
+    /// The window only takes the mouse over the photo and its corners, and
+    /// the cross shows while the pointer is there. While you move or resize
+    /// it, it keeps the mouse whatever the pointer does.
+    private func trackMouse() {
+        guard !model.interacting else { return }
+        let over = NSMouseInRect(NSEvent.mouseLocation, current.insetBy(dx: -PreviewStage.grip, dy: -PreviewStage.grip), false)
+        if panel.ignoresMouseEvents == over { panel.ignoresMouseEvents = !over }
+        if model.hovering != over { model.hovering = over }
+    }
+
+    /// Flies back into the card, or fades where it is when the card is not
+    /// in view. Without an animation it is gone at once.
+    func close(animation: Animation?) {
+        timer?.invalidate()
+        timer = nil
         monitors.forEach(NSEvent.removeMonitor)
         monitors.removeAll()
-        guard let panel else { return }
-        self.panel = nil
-        guard animated else {
+        panel.ignoresMouseEvents = true
+        model.hovering = false
+        guard let animation else {
             panel.orderOut(nil)
             return
         }
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.15
-            panel.animator().alphaValue = 0
-        }, completionHandler: {
-            panel.orderOut(nil)
-        })
+        let back = card().flatMap { $0.intersects(screen.frame) ? $0 : nil }
+        withAnimation(animation) {
+            if let back {
+                model.rect = local(back)
+            } else {
+                let r = model.rect
+                model.rect = r.insetBy(dx: r.width * 0.04, dy: r.height * 0.04)
+                model.opacity = 0
+            }
+        }
+        let panel = panel
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) {
+            // The real card on the line takes over.
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.1
+                panel.animator().alphaValue = 0
+            }, completionHandler: {
+                panel.orderOut(nil)
+            })
+        }
     }
+}
+
+@MainActor
+private final class PreviewModel: ObservableObject {
+    let image: NSImage
+    @Published var rect: CGRect = .zero
+    @Published var tilt: Double = 0
+    @Published var opacity: Double = 1
+    @Published var hovering = false
+    /// Being moved or resized.
+    var interacting = false
+    var maxSize: CGSize = .zero
+    var onClose: () -> Void = {}
+
+    init(image: NSImage) { self.image = image }
 }
 
 /// Takes keys without bringing Tendedero to the front, so Escape works and
 /// the app you were in stays active.
-final class PreviewPanel: NSPanel {
+private final class PreviewPanel: NSPanel {
     var onDismiss: () -> Void = {}
 
     init(frame: NSRect) {
@@ -83,7 +228,8 @@ final class PreviewPanel: NSPanel {
                    backing: .buffered, defer: false)
         isOpaque = false
         backgroundColor = .clear
-        hasShadow = true
+        hasShadow = false
+        ignoresMouseEvents = true
         level = .popUpMenu
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         isReleasedWhenClosed = false
@@ -101,23 +247,157 @@ final class PreviewPanel: NSPanel {
     }
 }
 
-private struct PreviewView: View {
-    let image: NSImage
-    @State private var shown = false
+private struct PreviewStage: View {
+    @ObservedObject var model: PreviewModel
+    @State private var startRect: CGRect?
+
+    /// How far outside the photo a corner can be caught. The corner handle
+    /// is a square twice this size, centered on the corner.
+    static let grip: CGFloat = 20
+    static let minWidth: CGFloat = 180
 
     var body: some View {
+        let r = model.rect
+        ZStack(alignment: .topLeading) {
+            PreviewCard(image: model.image, width: r.width, hovering: model.hovering, onClose: model.onClose)
+                .frame(width: r.width, height: r.height)
+                .rotationEffect(.degrees(model.tilt), anchor: .top)
+                .position(x: r.midX, y: r.midY)
+                .opacity(model.opacity)
+                .gesture(move)
+
+            ForEach(Corner.allCases, id: \.self) { corner in
+                Color.clear
+                    .frame(width: Self.grip * 2, height: Self.grip * 2)
+                    .contentShape(Rectangle())
+                    .position(x: corner.sx > 0 ? r.maxX : r.minX, y: corner.sy > 0 ? r.maxY : r.minY)
+                    .onHover { inside in
+                        if inside { corner.cursor.set() } else if !model.interacting { NSCursor.arrow.set() }
+                    }
+                    .gesture(resize(corner))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // The window covers the menu bar too; without this SwiftUI would push
+        // everything below it and the card would start off its real spot.
+        .ignoresSafeArea()
+    }
+
+    private func begin() -> CGRect {
+        if let startRect { return startRect }
+        startRect = model.rect
+        model.interacting = true
+        return model.rect
+    }
+
+    private func end() {
+        startRect = nil
+        model.interacting = false
+    }
+
+    private var move: some Gesture {
+        DragGesture(minimumDistance: 2, coordinateSpace: .global)
+            .onChanged { v in
+                let s = begin()
+                model.rect.origin = CGPoint(x: s.minX + v.translation.width, y: s.minY + v.translation.height)
+            }
+            .onEnded { _ in end() }
+    }
+
+    /// Resizing keeps the photo's proportions and the opposite corner in place.
+    private func resize(_ corner: Corner) -> some Gesture {
+        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+            .onChanged { v in
+                let s = begin()
+                let byX = s.width + corner.sx * v.translation.width
+                let byY = (s.height + corner.sy * v.translation.height) * s.width / s.height
+                let limit = min(model.maxSize.width, model.maxSize.height * s.width / s.height)
+                let w = min(max(abs(byX - s.width) > abs(byY - s.width) ? byX : byY, Self.minWidth), limit)
+                let h = w * s.height / s.width
+                model.rect = CGRect(x: corner.sx > 0 ? s.minX : s.maxX - w,
+                                    y: corner.sy > 0 ? s.minY : s.maxY - h,
+                                    width: w, height: h)
+            }
+            .onEnded { _ in
+                end()
+                NSCursor.arrow.set()
+            }
+    }
+
+    enum Corner: CaseIterable {
+        case topLeft, topRight, bottomLeft, bottomRight
+        var sx: CGFloat { self == .topRight || self == .bottomRight ? 1 : -1 }
+        var sy: CGFloat { self == .bottomLeft || self == .bottomRight ? 1 : -1 }
+
+        /// The diagonal resize arrows. macOS 15 has them as public API;
+        /// macOS 14 only has the private ones, and a crosshair if even those
+        /// are missing.
+        var cursor: NSCursor {
+            if #available(macOS 15, *) {
+                let position: NSCursor.FrameResizePosition = switch self {
+                case .topLeft: .topLeft
+                case .topRight: .topRight
+                case .bottomLeft: .bottomLeft
+                case .bottomRight: .bottomRight
+                }
+                return NSCursor.frameResize(position: position, directions: .all)
+            }
+            let name = sx == sy ? "_windowResizeNorthWestSouthEastCursor" : "_windowResizeNorthEastSouthWestCursor"
+            let selector = NSSelectorFromString(name)
+            if NSCursor.responds(to: selector),
+               let cursor = NSCursor.perform(selector)?.takeUnretainedValue() as? NSCursor {
+                return cursor
+            }
+            return .crosshair
+        }
+    }
+}
+
+/// The hanging card, drawn larger: the same glass frame and concentric
+/// corners. The frame grows with the card, but less than in proportion, so
+/// a big photo does not end up looking like a pill.
+struct PreviewCard: View {
+    let image: NSImage
+    let width: CGFloat
+    let hovering: Bool
+    var onClose: () -> Void = {}
+
+    static func inset(forWidth width: CGFloat) -> CGFloat {
+        min(12, Frame.inset * max(1, width / Layout.cardWidth).squareRoot())
+    }
+
+    static func radius(forWidth width: CGFloat) -> CGFloat {
+        min(30, Frame.radius * max(1, width / Layout.cardWidth).squareRoot())
+    }
+
+    var body: some View {
+        let inset = Self.inset(forWidth: width)
+        let radius = Self.radius(forWidth: width)
         Image(nsImage: image)
             .resizable()
             .interpolation(.high)
-            .aspectRatio(contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: Frame.radius, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: radius - inset, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: Frame.radius, style: .continuous)
+                RoundedRectangle(cornerRadius: radius - inset, style: .continuous)
                     .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5)
             )
-            .scaleEffect(shown ? 1 : 0.96)
-            .onAppear {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) { shown = true }
+            .padding(inset)
+            .glassFrame(cornerRadius: radius)
+            .shadow(color: .black.opacity(0.28), radius: 24, y: 12)
+            .overlay(alignment: .topTrailing) {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 28, height: 28)
+                        .glassFrame(circle: true)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .padding(inset + 6)
+                    .opacity(hovering ? 1 : 0)
+                    .scaleEffect(hovering ? 1 : 0.6)
+                    .animation(.easeOut(duration: 0.18), value: hovering)
             }
     }
 }
