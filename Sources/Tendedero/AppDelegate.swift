@@ -610,7 +610,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(offset)
 
-        let garlandItem = NSMenuItem(title: L("Garlands", "Guirnaldas"), action: nil, keyEquivalent: "")
+        let garlandItem = NSMenuItem(title: L("Decorations", "Decoración"), action: nil, keyEquivalent: "")
         garlandItem.submenu = garlands.menu()
         menu.addItem(garlandItem)
 

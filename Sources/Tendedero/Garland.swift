@@ -191,6 +191,15 @@ final class Garlands: ObservableObject {
     @Published var style = GarlandStyle.defaults {
         didSet { saveStyle() }
     }
+    /// The three candles, if they are out.
+    @Published var candles: CandleSet? {
+        didSet { saveCandles() }
+    }
+    @Published var candleStyle = CandleStyle.defaults {
+        didSet { saveCandles() }
+    }
+
+    var isEmpty: Bool { items.isEmpty && candles == nil }
 
     var visible: Bool {
         get { !UserDefaults.standard.bool(forKey: "garlandsHidden") }
@@ -202,6 +211,8 @@ final class Garlands: ObservableObject {
 
     private let storeKey = "garlands"
     private let styleKey = "garlandStyle"
+    private let candlesKey = "candles"
+    private let candleStyleKey = "candleStyle"
 
     init() {
         if let data = UserDefaults.standard.data(forKey: storeKey),
@@ -212,6 +223,32 @@ final class Garlands: ObservableObject {
            let saved = try? JSONDecoder().decode(GarlandStyle.self, from: data) {
             style = saved
         }
+        if let data = UserDefaults.standard.data(forKey: candlesKey),
+           let saved = try? JSONDecoder().decode(CandleSet.self, from: data) {
+            candles = saved
+        }
+        if let data = UserDefaults.standard.data(forKey: candleStyleKey),
+           let saved = try? JSONDecoder().decode(CandleStyle.self, from: data) {
+            candleStyle = saved
+        }
+    }
+
+    private func saveCandles() {
+        let defaults = UserDefaults.standard
+        if let candles, let data = try? JSONEncoder().encode(candles) {
+            defaults.set(data, forKey: candlesKey)
+        } else {
+            defaults.removeObject(forKey: candlesKey)
+        }
+        if let data = try? JSONEncoder().encode(candleStyle) {
+            defaults.set(data, forKey: candleStyleKey)
+        }
+    }
+
+    /// Three candles near the bottom right of the screen you are on.
+    func addCandles(on screen: NSScreen?) {
+        guard let frame = (screen ?? NSScreen.main)?.visibleFrame else { return }
+        candles = CandleSet(position: CGPoint(x: frame.minX + frame.width * 0.82, y: frame.minY + 70))
     }
 
     private func saveStyle() {

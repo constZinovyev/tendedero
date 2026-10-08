@@ -36,7 +36,7 @@ final class GarlandController {
             guard let self else { return }
             let show = self.store.visible || self.store.editing
             for overlay in self.overlays {
-                if show && Placement.allows(overlay.home) && (!self.store.items.isEmpty || self.store.editing) {
+                if show && Placement.allows(overlay.home) && (!self.store.isEmpty || self.store.editing) {
                     overlay.refreshGarlands()
                     overlay.orderFrontRegardless()
                 } else {
@@ -58,6 +58,11 @@ final class GarlandController {
         store.add(on: Self.lineScreen)
     }
 
+    func addCandles() {
+        store.editing = true
+        store.addCandles(on: Self.lineScreen)
+    }
+
     /// The screen the line hangs on now, or would come down on.
     private static var lineScreen: NSScreen? {
         Placement.mainScreenOnly ? Placement.mainScreen : LinePanel.screenUnderPointer()
@@ -66,20 +71,25 @@ final class GarlandController {
     /// The Garlands submenu of the status item.
     func menu() -> NSMenu {
         let menu = NSMenu()
-        let show = ClosureMenuItem(L("Show garlands", "Mostrar guirnaldas")) { [weak self] in
+        let show = ClosureMenuItem(L("Show decorations", "Mostrar decoración")) { [weak self] in
             guard let self else { return }
             self.store.visible.toggle()
         }
         show.state = store.visible ? .on : .off
-        show.isEnabled = !store.items.isEmpty
+        show.isEnabled = !store.isEmpty
         menu.addItem(show)
 
         let edit = ClosureMenuItem(store.editing ? L("Done editing", "Terminar edición")
-                                                 : L("Edit garlands…", "Editar guirnaldas…")) { [weak self] in
+                                                 : L("Edit decorations…", "Editar decoración…")) { [weak self] in
             self?.toggleEditing()
         }
         menu.addItem(edit)
         menu.addItem(ClosureMenuItem(L("Add garland", "Añadir guirnalda")) { [weak self] in self?.add() })
+        if store.candles == nil {
+            menu.addItem(ClosureMenuItem(L("Add candles", "Añadir velas")) { [weak self] in self?.addCandles() })
+        } else {
+            menu.addItem(ClosureMenuItem(L("Remove candles", "Quitar velas")) { [weak self] in self?.store.candles = nil })
+        }
 
         menu.addItem(.separator())
         let allOn = ClosureMenuItem(L("All lights on", "Encender todas")) { [weak self] in self?.store.setAll(.on) }
@@ -90,9 +100,44 @@ final class GarlandController {
         menu.addItem(allOff)
 
         menu.addItem(.separator())
-        let look = NSMenuItem(title: L("Appearance", "Aspecto"), action: nil, keyEquivalent: "")
+        let look = NSMenuItem(title: L("Garland appearance", "Aspecto de las guirnaldas"), action: nil, keyEquivalent: "")
         look.submenu = appearanceMenu()
         menu.addItem(look)
+        let candleLook = NSMenuItem(title: L("Candle appearance", "Aspecto de las velas"), action: nil, keyEquivalent: "")
+        candleLook.submenu = candleMenu()
+        menu.addItem(candleLook)
+        return menu
+    }
+
+    /// The candles' wax, size, halo, flicker and warmth.
+    private func candleMenu() -> NSMenu {
+        let menu = NSMenu()
+        let store = store
+        let style = store.candleStyle
+        for wax in CandleStyle.Wax.allCases {
+            let item = ClosureMenuItem(wax.title) { store.candleStyle.wax = wax }
+            item.state = style.wax == wax ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+
+        func slider(_ title: String, _ value: Double, _ range: ClosedRange<Double>,
+                    format: @escaping (Double) -> String, set: @escaping (inout CandleStyle, Double) -> Void) {
+            let item = NSMenuItem()
+            item.view = SliderMenuView(title: title, value: value, range: range, format: format) { v in
+                set(&store.candleStyle, v)
+            }
+            menu.addItem(item)
+        }
+        slider(L("Size", "Tamaño"), Double(style.size), 4...24, format: { "\(Int($0.rounded())) pt" }) { $0.size = CGFloat($1) }
+        slider(L("Halo", "Halo"), Double(style.halo) * 100, 0...150, format: { "\(Int($0.rounded()))%" }) { $0.halo = CGFloat($1 / 100) }
+        slider(L("Flicker", "Parpadeo"), Double(style.flicker) * 100, 0...150, format: { "\(Int($0.rounded()))%" }) { $0.flicker = CGFloat($1 / 100) }
+        slider(L("Warmth", "Calidez"), Double(style.warmth), 18...48, format: { "\(Int($0.rounded()))°" }) { $0.warmth = CGFloat($1) }
+
+        menu.addItem(.separator())
+        let reset = ClosureMenuItem(L("Reset to defaults", "Restablecer")) { store.candleStyle = .defaults }
+        reset.isEnabled = style != .defaults
+        menu.addItem(reset)
         return menu
     }
 
@@ -207,11 +252,13 @@ final class GarlandEditView: NSView {
     private let store: Garlands
     private let screenFrame: CGRect
     private let layers = GarlandLayers()
+    private let candleLayers = CandleLayers()
     private let handles = CAShapeLayer()
     private let doneButton = NSButton()
 
     private enum Target {
         case start(UUID), end(UUID), sag(UUID), wire(UUID, CGPoint, CGPoint), bulb(UUID, Int)
+        case candles(CGPoint)
     }
     private var target: Target?
     private var downPoint: CGPoint = .zero
@@ -225,6 +272,7 @@ final class GarlandEditView: NSView {
         self.screenFrame = screenFrame
         super.init(frame: CGRect(origin: .zero, size: screenFrame.size))
         wantsLayer = true
+        layer?.addSublayer(candleLayers.root)
         layer?.addSublayer(layers.root)
         handles.fillColor = NSColor.white.cgColor
         handles.strokeColor = NSColor.controlAccentColor.cgColor
@@ -258,6 +306,7 @@ final class GarlandEditView: NSView {
     func reload() {
         let scale = window?.backingScaleFactor ?? 2
         layers.render(store.items, style: store.style, origin: screenFrame.origin, scale: scale)
+        candleLayers.render(store.candles, style: store.candleStyle, origin: screenFrame.origin, scale: scale)
         doneButton.isHidden = !store.editing || !screenFrame.contains(NSEvent.mouseLocation) && NSScreen.screens.count > 1
         drawHandles()
     }
@@ -307,6 +356,9 @@ final class GarlandEditView: NSView {
             }
             if geo.distance(to: p) <= 8 { return .wire(g.id, g.start, g.end) }
         }
+        if let set = store.candles, store.candleStyle.bounds(at: set.position).contains(p) {
+            return .candles(set.position)
+        }
         return nil
     }
 
@@ -340,6 +392,8 @@ final class GarlandEditView: NSView {
             guard let g = store.items.first(where: { $0.id == id }) else { return }
             self.target = .wire(id, g.start, g.end)
             mouseDragged(with: event)
+        case .candles(let start):
+            store.candles?.position = CGPoint(x: start.x + p.x - downPoint.x, y: start.y + p.y - downPoint.y)
         case .wire(let id, let s, let e):
             let dx = p.x - downPoint.x, dy = p.y - downPoint.y
             store.update(id, save: false) { g in
@@ -365,6 +419,12 @@ final class GarlandEditView: NSView {
         let id: UUID?
         switch hit(p) {
         case .start(let g), .end(let g), .sag(let g), .wire(let g, _, _), .bulb(let g, _): id = g
+        case .candles:
+            let menu = NSMenu()
+            let store = store
+            menu.addItem(ClosureMenuItem(L("Remove candles", "Quitar velas")) { store.candles = nil })
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+            return
         case nil: id = nil
         }
         guard let id, let g = store.items.first(where: { $0.id == id }) else { return }
