@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var safetyWatcher: ScreenshotWatcher?
     private var signalSources: [DispatchSourceSignal] = []
     private var hotKeys: [HotKey] = []
+    private var lockScreen: LockScreen!
     private var cancellables = Set<AnyCancellable>()
     private var mouseTimer: Timer?
 
@@ -74,6 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ]
 
         setUpStatusItem()
+        lockScreen = LockScreen(line: line, panel: panel)
         watchMenuBarClicks()
 
         Markup.shared.onSaved = { [weak self] url in self?.line.reloadThumbnail(for: url) }
@@ -129,6 +131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         if Inbox.isEnabled { Inbox.restore() }
+        lockScreen.restore()
     }
 
     // MARK: Inbox mode
@@ -182,8 +185,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for sig in [SIGTERM, SIGINT, SIGHUP] {
             signal(sig, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-            source.setEventHandler {
+            source.setEventHandler { [weak self] in
                 if Inbox.isEnabled { Inbox.restore() }
+                self?.lockScreen.restore()
                 exit(0)
             }
             source.resume()
@@ -578,6 +582,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         behind.toolTip = L("The line hangs on the desktop, under every window",
                            "El tendedero se cuelga en el escritorio, bajo todas las ventanas")
         menu.addItem(behind)
+
+        let locked = ClosureMenuItem(L("On the lock screen", "En la pantalla de bloqueo")) {
+            LockScreen.isEnabled.toggle()
+        }
+        locked.state = LockScreen.isEnabled ? .on : .off
+        locked.toolTip = L("While the Mac is locked, the desktop picture shows the line as it hangs",
+                           "Con el Mac bloqueado, el fondo de escritorio muestra el tendedero tal como está")
+        menu.addItem(locked)
 
         let offset = NSMenuItem()
         offset.view = SliderMenuView(
