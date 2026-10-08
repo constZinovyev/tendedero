@@ -1,15 +1,29 @@
 import AppKit
 import Combine
 
-/// Shows the garlands: one transparent window per screen, each drawing every
-/// garland that crosses it. Outside of editing the windows ignore the mouse
-/// completely, so they cost nothing and never get in the way.
+/// One decoration on the desktop: a garland, or the candles.
+enum Decor: Hashable {
+    case garland(UUID)
+    case candles
+}
+
+/// Shows the decorations. Each one gets its own small window, just big
+/// enough for it, so macOS itself can tell when that one is covered by other
+/// windows, on another Space or on a sleeping display; then its animation
+/// pauses. The windows sit just above the desktop icons, under every other
+/// window and under the line. They let the mouse through except right over a
+/// wire, a bulb or the candles, which is checked only when the mouse moves.
 @MainActor
 final class GarlandController {
     let store = Garlands()
-    private var overlays: [GarlandOverlay] = []
+    /// The line's window, so the decorations always stay under it.
+    var lineWindow: (() -> NSWindow?)?
+
+    private var windows: [Decor: DecorWindow] = [:]
     private var refreshPending = false
     private var cancellables = Set<AnyCancellable>()
+    private var monitors: [Any] = []
+    private lazy var donePanel = DonePanel { [weak self] in self?.store.editing = false }
 
     init() {
         store.objectWillChange
@@ -19,43 +33,70 @@ final class GarlandController {
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.rebuildOverlays() }
+            MainActor.assumeIsolated { self?.refresh() }
         }
-        rebuildOverlays()
-    }
-
-    private func rebuildOverlays() {
-        overlays.forEach { $0.orderOut(nil) }
-        overlays = NSScreen.screens.map { GarlandOverlay(screen: $0, store: store) }
+        // Only when the mouse moves: decide which decoration, if any, should
+        // catch it. Nothing runs while the mouse is still.
+        let moved: (NSEvent?) -> Void = { [weak self] _ in
+            MainActor.assumeIsolated { self?.mouseMoved() }
+        }
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved], handler: moved) { monitors.append(m) }
+        if let m = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved], handler: { moved($0); return $0 }) {
+            monitors.append(m)
+        }
         refresh()
     }
 
-    /// Garlands hang on the screens the line may come down on.
+    /// Redraws after changes, once however many came in meanwhile (a drag
+    /// sends many). objectWillChange fires before a change lands, so this
+    /// waits for the next turn of the run loop.
     func refresh() {
-        // objectWillChange fires before the change lands; draw after it, and
-        // only once however many changes came in meanwhile (a drag sends many).
         guard !refreshPending else { return }
         refreshPending = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.refreshPending = false
-            let show = self.store.visible || self.store.editing
-            for overlay in self.overlays {
-                if show && Placement.allows(overlay.home) && (!self.store.isEmpty || self.store.editing) {
-                    overlay.refreshGarlands()
-                    overlay.orderFrontRegardless()
-                } else {
-                    overlay.orderOut(nil)
-                }
+            self.sync()
+        }
+    }
+
+    private func sync() {
+        let show = store.visible || store.editing
+        var wanted: [Decor] = []
+        if show {
+            wanted = store.items.map { .garland($0.id) }
+            if store.candles != nil { wanted.append(.candles) }
+        }
+        for (key, window) in windows where !wanted.contains(key) {
+            window.orderOut(nil)
+            windows[key] = nil
+        }
+        let line = lineWindow?()
+        for key in wanted {
+            let window = windows[key] ?? DecorWindow(decor: key, store: store, controller: self)
+            windows[key] = window
+            guard let frame = window.decorView.contentFrame(),
+                  let screen = NSScreen.screens.first(where: { $0.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) })
+                    ?? NSScreen.main,
+                  Placement.allows(screen) else {
+                window.orderOut(nil)
+                continue
             }
+            window.show(in: frame, editing: store.editing, below: line)
+        }
+        if store.editing { donePanel.present(on: Self.lineScreen) } else { donePanel.orderOut(nil) }
+        mouseMoved()
+    }
+
+    private func mouseMoved() {
+        let p = NSEvent.mouseLocation
+        for window in windows.values where window.isVisible {
+            window.catchMouse(window.decorView.hits(p))
         }
     }
 
     func toggleEditing() {
         store.editing.toggle()
-        if store.editing, let overlay = overlays.first(where: { $0.home == Self.lineScreen }) {
-            overlay.makeKey()
-        }
     }
 
     func add() {
@@ -64,16 +105,17 @@ final class GarlandController {
     }
 
     func addCandles() {
-        store.editing = true
         store.addCandles(on: Self.lineScreen)
     }
 
     /// The screen the line hangs on now, or would come down on.
-    private static var lineScreen: NSScreen? {
+    static var lineScreen: NSScreen? {
         Placement.mainScreenOnly ? Placement.mainScreen : LinePanel.screenUnderPointer()
     }
 
-    /// The Garlands submenu of the status item.
+    // MARK: Menus
+
+    /// The Decorations submenu of the status item.
     func menu() -> NSMenu {
         let menu = NSMenu()
         let show = ClosureMenuItem(L("Show decorations", "Mostrar decoración")) { [weak self] in
@@ -85,7 +127,7 @@ final class GarlandController {
         menu.addItem(show)
 
         let edit = ClosureMenuItem(store.editing ? L("Done editing", "Terminar edición")
-                                                 : L("Edit decorations…", "Editar decoración…")) { [weak self] in
+                                                 : L("Edit objects…", "Editar objetos…")) { [weak self] in
             self?.toggleEditing()
         }
         menu.addItem(edit)
@@ -115,7 +157,7 @@ final class GarlandController {
     }
 
     /// The candles' wax, size, halo, flicker and warmth.
-    private func candleMenu() -> NSMenu {
+    func candleMenu() -> NSMenu {
         let menu = NSMenu()
         let store = store
         let style = store.candleStyle
@@ -151,7 +193,7 @@ final class GarlandController {
 
     /// The look of every garland: the bulb design and its details. Changes
     /// show on the screen at once, so the garlands come out while you tune.
-    private func appearanceMenu() -> NSMenu {
+    func appearanceMenu() -> NSMenu {
         let menu = NSMenu()
         let store = store
         let style = store.style
@@ -206,35 +248,36 @@ final class GarlandController {
     }
 }
 
-/// The window over one screen.
+/// The small window around one decoration.
 @MainActor
-final class GarlandOverlay: NSPanel {
-    let store: Garlands
-    /// The screen this window covers.
-    let home: NSScreen
-    private let view: GarlandEditView
+final class DecorWindow: NSPanel {
+    let decorView: DecorView
+    private let store: Garlands
 
-    init(screen: NSScreen, store: Garlands) {
+    /// Just above the desktop icons, so the decorations can be clicked, and
+    /// under every ordinary window.
+    static let level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
+
+    init(decor: Decor, store: Garlands, controller: GarlandController) {
         self.store = store
-        home = screen
-        view = GarlandEditView(store: store, screenFrame: screen.frame)
-        super.init(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel],
-                   backing: .buffered, defer: false)
+        decorView = DecorView(decor: decor, store: store, controller: controller)
+        super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isOpaque = false
         backgroundColor = .clear
         hasShadow = false
         collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
-        contentView = view
-        setFrame(screen.frame, display: false)
-        // When windows cover the desktop completely, nothing here can be
-        // seen: stop the animations until it shows again.
+        ignoresMouseEvents = true
+        level = Self.level
+        contentView = decorView
+        // Covered by other windows, on another Space or on a sleeping
+        // display: nothing to see, so nothing to animate.
         NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,
                                                object: self, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.view.setPaused(!self.occlusionState.contains(.visible))
+                self.decorView.setPaused(!self.occlusionState.contains(.visible))
             }
         }
     }
@@ -242,40 +285,44 @@ final class GarlandOverlay: NSPanel {
     override var canBecomeKey: Bool { store.editing }
     override var canBecomeMain: Bool { false }
 
-    /// While editing, the garlands float over everything and take the mouse,
-    /// so they can be reached even when windows cover them.
-    func refreshGarlands() {
-        let editing = store.editing
-        ignoresMouseEvents = !editing
-        level = editing ? .floating : Self.background
-        view.reload()
-    }
-
-    /// Just above the wallpaper: under the desktop icons, every window and
-    /// the line with its photos, even when the line itself hangs behind windows.
-    static let background = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1)
-
     override func cancelOperation(_ sender: Any?) {
         if store.editing { store.editing = false }
     }
+
+    /// While editing, every decoration floats over the windows so it can be
+    /// reached even where they cover it.
+    func show(in frame: CGRect, editing: Bool, below line: NSWindow?) {
+        if self.frame != frame { setFrame(frame, display: false) }
+        level = editing ? .floating : Self.level
+        decorView.reload()
+        if !isVisible { orderFrontRegardless() }
+        if !editing, let line, line.isVisible, line.level == level {
+            order(.below, relativeTo: line.windowNumber)
+        }
+    }
+
+    func catchMouse(_ catching: Bool) {
+        if ignoresMouseEvents == catching { ignoresMouseEvents = !catching }
+    }
 }
 
-/// Draws the garlands and, while editing, lets you shape them: drag an end
-/// to move it, the middle handle to change the sag, the wire to move the
-/// whole garland. Click a bulb to switch it off or on; right click a garland
-/// for its settings.
+/// Draws one decoration and handles the mouse on it. The candles can be
+/// dragged any time. A garland is shaped in edit mode: drag an end, the
+/// middle handle (down for depth, sideways to shift the lowest point) or
+/// the wire to move it; click a bulb to switch it off or on. Right click
+/// either for its settings.
 @MainActor
-final class GarlandEditView: NSView {
+final class DecorView: NSView {
+    let decor: Decor
     private let store: Garlands
-    private let screenFrame: CGRect
-    private let layers = GarlandLayers()
+    private weak var controller: GarlandController?
+    private let garlandLayers = GarlandLayers()
     private let candleLayers = CandleLayers()
     private let handles = CAShapeLayer()
-    private let doneButton = NSButton()
+    private var geometry: (garland: Garland, geo: GarlandGeometry, bulbs: [CGPoint])?
 
     private enum Target {
-        case start(UUID), end(UUID), sag(UUID), wire(UUID, CGPoint, CGPoint), bulb(UUID, Int)
-        case candles(CGPoint)
+        case start, end, sag, wire(CGPoint, CGPoint), bulb(Int), candles(CGPoint)
     }
     private var target: Target?
     private var downPoint: CGPoint = .zero
@@ -284,13 +331,14 @@ final class GarlandEditView: NSView {
     private static let handleRadius: CGFloat = 7
     private static let grab: CGFloat = 12
 
-    init(store: Garlands, screenFrame: CGRect) {
+    init(decor: Decor, store: Garlands, controller: GarlandController) {
+        self.decor = decor
         self.store = store
-        self.screenFrame = screenFrame
-        super.init(frame: CGRect(origin: .zero, size: screenFrame.size))
+        self.controller = controller
+        super.init(frame: .zero)
         wantsLayer = true
         layer?.addSublayer(candleLayers.root)
-        layer?.addSublayer(layers.root)
+        layer?.addSublayer(garlandLayers.root)
         handles.fillColor = NSColor.white.cgColor
         handles.strokeColor = NSColor.controlAccentColor.cgColor
         handles.lineWidth = 2
@@ -298,27 +346,38 @@ final class GarlandEditView: NSView {
         handles.shadowRadius = 2
         handles.shadowOffset = CGSize(width: 0, height: -1)
         layer?.addSublayer(handles)
-
-        doneButton.title = L("Done", "Listo")
-        doneButton.bezelStyle = .push
-        doneButton.keyEquivalent = "\r"
-        doneButton.target = self
-        doneButton.action = #selector(done)
-        doneButton.sizeToFit()
-        addSubview(doneButton)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    override func layout() {
-        super.layout()
-        doneButton.frame.origin = CGPoint(x: (bounds.width - doneButton.frame.width) / 2,
-                                          y: bounds.height - doneButton.frame.height - 40)
+    private var garland: Garland? {
+        guard case .garland(let id) = decor else { return nil }
+        return store.items.first { $0.id == id }
     }
 
-    @objc private func done() { store.editing = false }
+    /// The window's frame in screen coordinates: the decoration with room
+    /// for its glow and, for a garland, its handles.
+    func contentFrame() -> CGRect? {
+        switch decor {
+        case .candles:
+            guard let set = store.candles else { return nil }
+            let st = store.candleStyle
+            return st.bounds(at: set.position).insetBy(dx: -st.size * 6, dy: -st.size * 6).integral
+        case .garland:
+            guard let g = garland else { return nil }
+            let st = store.style
+            let geo = GarlandGeometry(g)
+            let xs = geo.points.map(\.x), ys = geo.points.map(\.y)
+            let glow = st.bulbSize * st.haloSize + 6
+            let margin = max(glow, Self.grab) + 4
+            let rect = CGRect(x: (xs.min() ?? 0) - margin, y: (ys.min() ?? 0) - st.lightDrop - glow - st.bulbSize * 2,
+                              width: (xs.max() ?? 0) - (xs.min() ?? 0) + margin * 2, height: 0)
+            let top = max(ys.max() ?? 0, GarlandGeometry.middle(of: g).y) + margin
+            return CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: top - rect.minY).integral
+        }
+    }
 
     /// Freezes or resumes every animation in this window.
     func setPaused(_ paused: Bool) {
@@ -337,142 +396,151 @@ final class GarlandEditView: NSView {
     }
 
     func reload() {
-        let scale = window?.backingScaleFactor ?? 2
-        layers.render(store.items, style: store.style, origin: screenFrame.origin, scale: scale)
-        candleLayers.render(store.candles, style: store.candleStyle, origin: screenFrame.origin, scale: scale)
-        doneButton.isHidden = !store.editing || !screenFrame.contains(NSEvent.mouseLocation) && NSScreen.screens.count > 1
-        drawHandles()
+        guard let window else { return }
+        let scale = window.backingScaleFactor
+        let origin = window.frame.origin
+        switch decor {
+        case .candles:
+            candleLayers.render(store.candles, style: store.candleStyle, origin: origin, scale: scale)
+            geometry = nil
+        case .garland:
+            guard let g = garland else { return }
+            garlandLayers.render([g], style: store.style, origin: origin, scale: scale)
+            let geo = GarlandGeometry(g)
+            geometry = (g, geo, geo.bulbPositions(spacing: g.spacing).map { store.style.bulbCenter(below: $0) })
+        }
+        drawHandles(origin: origin)
     }
 
-    private func drawHandles() {
+    private func drawHandles(origin: CGPoint) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
-        guard store.editing else {
+        guard store.editing, let g = garland else {
             handles.path = nil
             return
         }
         let path = CGMutablePath()
         let r = Self.handleRadius
-        for g in store.items {
-            for p in [g.start, g.end] {
-                path.addEllipse(in: CGRect(x: p.x - screenFrame.minX - r, y: p.y - screenFrame.minY - r, width: r * 2, height: r * 2))
-            }
-            let m = GarlandGeometry.middle(of: g)
-            let s = r * 0.8
-            path.addRoundedRect(in: CGRect(x: m.x - screenFrame.minX - s, y: m.y - screenFrame.minY - s, width: s * 2, height: s * 2),
-                                cornerWidth: 2, cornerHeight: 2)
+        for p in [g.start, g.end] {
+            path.addEllipse(in: CGRect(x: p.x - origin.x - r, y: p.y - origin.y - r, width: r * 2, height: r * 2))
         }
+        let m = GarlandGeometry.middle(of: g)
+        let s = r * 0.8
+        path.addRoundedRect(in: CGRect(x: m.x - origin.x - s, y: m.y - origin.y - s, width: s * 2, height: s * 2),
+                            cornerWidth: 2, cornerHeight: 2)
         handles.path = path
     }
 
-    /// A point in this view to global screen coordinates.
-    private func global(_ event: NSEvent) -> CGPoint {
-        let p = convert(event.locationInWindow, from: nil)
-        return CGPoint(x: p.x + screenFrame.minX, y: p.y + screenFrame.minY)
+    /// What is under a point in screen coordinates, or nil to let the
+    /// click through to whatever is below.
+    private func hit(_ p: CGPoint) -> Target? {
+        switch decor {
+        case .candles:
+            guard let set = store.candles, store.candleStyle.bounds(at: set.position).contains(p) else { return nil }
+            return .candles(set.position)
+        case .garland:
+            guard let geometry else { return nil }
+            let g = geometry.garland, geo = geometry.geo, bulbs = geometry.bulbs
+            if store.editing {
+                if hypot(g.start.x - p.x, g.start.y - p.y) <= Self.grab { return .start }
+                if hypot(g.end.x - p.x, g.end.y - p.y) <= Self.grab { return .end }
+                let m = GarlandGeometry.middle(of: g)
+                if hypot(m.x - p.x, m.y - p.y) <= Self.grab { return .sag }
+            }
+            let reach = store.style.bulbSize * 1.3 + 4
+            if let i = bulbs.firstIndex(where: { hypot($0.x - p.x, $0.y - p.y) <= reach }) { return .bulb(i) }
+            if geo.distance(to: p) <= 8 { return .wire(g.start, g.end) }
+            return nil
+        }
     }
 
-    /// What is under the pointer, handles first, the topmost garland first.
-    private func hit(_ p: CGPoint) -> Target? {
-        let style = store.style
-        for g in store.items.reversed() {
-            if hypot(g.start.x - p.x, g.start.y - p.y) <= Self.grab { return .start(g.id) }
-            if hypot(g.end.x - p.x, g.end.y - p.y) <= Self.grab { return .end(g.id) }
-            let m = GarlandGeometry.middle(of: g)
-            if hypot(m.x - p.x, m.y - p.y) <= Self.grab { return .sag(g.id) }
-        }
-        for g in store.items.reversed() {
-            let geo = GarlandGeometry(g)
-            for (i, b) in geo.bulbPositions(spacing: g.spacing).enumerated() {
-                let c = style.bulbCenter(below: b)
-                if hypot(c.x - p.x, c.y - p.y) <= style.bulbSize * 1.3 + 4 { return .bulb(g.id, i) }
-            }
-            if geo.distance(to: p) <= 8 { return .wire(g.id, g.start, g.end) }
-        }
-        if let set = store.candles, store.candleStyle.bounds(at: set.position).contains(p) {
-            return .candles(set.position)
-        }
-        return nil
+    func hits(_ p: CGPoint) -> Bool {
+        target != nil || hit(p) != nil
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard store.editing else { return }
-        downPoint = global(event)
+        downPoint = NSEvent.mouseLocation
         moved = false
         target = hit(downPoint)
         if case .candles = target { store.holdSaves = true }
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard store.editing, let target else { return }
-        let p = global(event)
+        guard let target else { return }
+        let p = NSEvent.mouseLocation
         if hypot(p.x - downPoint.x, p.y - downPoint.y) > 3 { moved = true }
         guard moved else { return }
-        // Saved on mouse up; while dragging only the drawing changes.
+        let dx = p.x - downPoint.x, dy = p.y - downPoint.y
+        if case .candles(let start) = target {
+            store.candles?.position = CGPoint(x: start.x + dx, y: start.y + dy)
+            return
+        }
+        // A garland only changes shape in edit mode. Saved on mouse up.
+        guard store.editing, case .garland(let id) = decor else { return }
         switch target {
-        case .start(let id):
+        case .start:
             store.update(id, save: false) { $0.start = p }
-        case .end(let id):
+        case .end:
             store.update(id, save: false) { $0.end = p }
-        case .sag(let id):
-            // The middle handle moves down for depth and sideways to shift
-            // the lowest part towards one end.
+        case .sag:
             store.update(id, save: false) { g in
                 g.sag = (g.start.y + g.end.y) / 2 - p.y
                 g.shift = p.x - (g.start.x + g.end.x) / 2
             }
-        case .bulb(let id, _):
+        case .bulb:
             // Dragging from a bulb moves the whole garland, like the wire.
-            guard let g = store.items.first(where: { $0.id == id }) else { return }
-            self.target = .wire(id, g.start, g.end)
+            guard let g = garland else { return }
+            self.target = .wire(g.start, g.end)
             mouseDragged(with: event)
-        case .candles(let start):
-            store.candles?.position = CGPoint(x: start.x + p.x - downPoint.x, y: start.y + p.y - downPoint.y)
-        case .wire(let id, let s, let e):
-            let dx = p.x - downPoint.x, dy = p.y - downPoint.y
+        case .wire(let s, let e):
             store.update(id, save: false) { g in
                 g.start = CGPoint(x: s.x + dx, y: s.y + dy)
                 g.end = CGPoint(x: e.x + dx, y: e.y + dy)
             }
+        case .candles:
+            break
         }
     }
 
     override func mouseUp(with event: NSEvent) {
-        guard store.editing else { return }
         if store.holdSaves {
             store.holdSaves = false
             store.saveCandles()
         }
-        if !moved, case .bulb(let id, let i) = target {
+        if store.editing, !moved, case .bulb(let i) = target, case .garland(let id) = decor {
             store.toggleBulb(i, of: id)
-        } else if moved {
+        } else if moved, case .garland = decor {
             store.save()
         }
         target = nil
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        guard store.editing else { return }
-        let p = global(event)
-        let id: UUID?
-        switch hit(p) {
-        case .start(let g), .end(let g), .sag(let g), .wire(let g, _, _), .bulb(let g, _): id = g
-        case .candles:
-            let menu = NSMenu()
-            let store = store
-            menu.addItem(ClosureMenuItem(L("Remove candles", "Quitar velas")) { store.candles = nil })
-            NSMenu.popUpContextMenu(menu, with: event, for: self)
-            return
-        case nil: id = nil
+        guard hit(NSEvent.mouseLocation) != nil else { return }
+        let menu: NSMenu
+        switch decor {
+        case .candles: menu = candleMenu()
+        case .garland: guard let g = garland else { return }; menu = garlandMenu(g)
         }
-        guard let id, let g = store.items.first(where: { $0.id == id }) else { return }
-        NSMenu.popUpContextMenu(menu(for: g), with: event, for: self)
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 
-    private func menu(for g: Garland) -> NSMenu {
+    private func candleMenu() -> NSMenu {
+        let menu = controller?.candleMenu() ?? NSMenu()
+        let store = store
+        menu.addItem(.separator())
+        menu.addItem(ClosureMenuItem(L("Remove candles", "Quitar velas")) { store.candles = nil })
+        return menu
+    }
+
+    private func garlandMenu(_ g: Garland) -> NSMenu {
         let menu = NSMenu()
         let store = store
         let id = g.id
+        menu.addItem(ClosureMenuItem(store.editing ? L("Done editing", "Terminar edición")
+                                                   : L("Edit", "Editar")) { store.editing.toggle() })
+        menu.addItem(.separator())
         for mode in Garland.Mode.allCases {
             let item = ClosureMenuItem(mode.title) { store.update(id) { $0.mode = mode } }
             item.state = g.mode == mode ? .on : .off
@@ -506,8 +574,64 @@ final class GarlandEditView: NSView {
         ) { value in store.update(id) { $0.speed = value / 100 } }
         menu.addItem(speed)
 
+        if let controller {
+            let look = NSMenuItem(title: L("Garland appearance", "Aspecto de las guirnaldas"), action: nil, keyEquivalent: "")
+            look.submenu = controller.appearanceMenu()
+            menu.addItem(look)
+        }
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem(L("Delete garland", "Eliminar guirnalda")) { store.remove(id) })
         return menu
+    }
+}
+
+/// A small floating bar with a Done button while editing. It also takes
+/// Escape and Return.
+@MainActor
+final class DonePanel: NSPanel {
+    private let onDone: () -> Void
+
+    init(onDone: @escaping () -> Void) {
+        self.onDone = onDone
+        super.init(contentRect: CGRect(x: 0, y: 0, width: 240, height: 44),
+                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        level = .floating
+        collectionBehavior = [.canJoinAllSpaces, .ignoresCycle]
+        hidesOnDeactivate = false
+        isReleasedWhenClosed = false
+
+        let glass = NSVisualEffectView(frame: CGRect(x: 0, y: 0, width: 240, height: 44))
+        glass.material = .hudWindow
+        glass.state = .active
+        glass.wantsLayer = true
+        glass.layer?.cornerRadius = 12
+        let label = NSTextField(labelWithString: L("Editing objects", "Editando objetos"))
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.frame = CGRect(x: 14, y: 13, width: 140, height: 18)
+        let button = NSButton(title: L("Done", "Listo"), target: nil, action: nil)
+        button.bezelStyle = .push
+        button.keyEquivalent = "\r"
+        button.sizeToFit()
+        button.frame.origin = CGPoint(x: 240 - button.frame.width - 8, y: (44 - button.frame.height) / 2)
+        button.target = self
+        button.action = #selector(done)
+        glass.addSubview(label)
+        glass.addSubview(button)
+        contentView = glass
+    }
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+    override func cancelOperation(_ sender: Any?) { onDone() }
+
+    @objc private func done() { onDone() }
+
+    func present(on screen: NSScreen?) {
+        guard let visible = (screen ?? NSScreen.main)?.visibleFrame else { return }
+        setFrameOrigin(CGPoint(x: visible.midX - frame.width / 2, y: visible.maxY - frame.height - 16))
+        if !isVisible { makeKeyAndOrderFront(nil) }
     }
 }

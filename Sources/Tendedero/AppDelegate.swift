@@ -76,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         setUpStatusItem()
         garlands = GarlandController()
+        garlands.lineWindow = { [weak self] in self?.panel }
         watchMenuBarClicks()
 
         Markup.shared.onSaved = { [weak self] url in self?.line.reloadThumbnail(for: url) }
