@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var safetyWatcher: ScreenshotWatcher?
     private var signalSources: [DispatchSourceSignal] = []
     private var hotKeys: [HotKey] = []
+    private var garlands: GarlandController!
     private var cancellables = Set<AnyCancellable>()
     private var mouseTimer: Timer?
 
@@ -74,6 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ]
 
         setUpStatusItem()
+        garlands = GarlandController()
         watchMenuBarClicks()
 
         Markup.shared.onSaved = { [weak self] url in self?.line.reloadThumbnail(for: url) }
@@ -588,6 +590,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(offset)
 
+        let garlandItem = NSMenuItem(title: L("Garlands", "Guirnaldas"), action: nil, keyEquivalent: "")
+        garlandItem.submenu = garlands.menu()
+        menu.addItem(garlandItem)
+
         let login = ClosureMenuItem(L("Open at login", "Abrir al iniciar sesión")) {
             AppDelegate.toggleLaunchAtLogin()
         }
@@ -638,11 +644,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 /// A labelled slider inside a menu, laid out like the menu's own items.
 final class SliderMenuView: NSView {
     private let onChange: (Double) -> Void
+    private let unit: String
     private let slider: NSSlider
     private let valueLabel = NSTextField(labelWithString: "")
 
-    init(title: String, value: Double, range: ClosedRange<Double>, onChange: @escaping (Double) -> Void) {
+    init(title: String, value: Double, range: ClosedRange<Double>, unit: String = " pt",
+         onChange: @escaping (Double) -> Void) {
         self.onChange = onChange
+        self.unit = unit
         slider = NSSlider(value: value, minValue: range.lowerBound, maxValue: range.upperBound, target: nil, action: nil)
         super.init(frame: NSRect(x: 0, y: 0, width: 240, height: 48))
 
@@ -675,7 +684,7 @@ final class SliderMenuView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     private func showValue() {
-        valueLabel.stringValue = "\(Int(slider.doubleValue.rounded())) pt"
+        valueLabel.stringValue = "\(Int(slider.doubleValue.rounded()))\(unit)"
     }
 
     @objc private func changed() {
