@@ -1,11 +1,19 @@
 import AppKit
+import AVFoundation
 import SwiftUI
 
-/// Experimental: the line on the lock screen. Apps cannot draw over the lock
-/// screen, but it shows the desktop picture. So when the screen locks, the
-/// desktop picture of the line's screen becomes a still of the line as it
-/// hangs right now, over that same picture, and the real one comes back on
-/// unlock. Nothing on it can be touched.
+/// Experimental: the line while the Mac is locked.
+///
+/// Apps cannot draw over the lock screen, so the line gets there two ways.
+/// The Tendedero screen saver plays the moving desktop picture with the line
+/// over it, from a picture of the line this keeps up to date in a shared
+/// folder. And behind the password prompt, which only ever shows the desktop
+/// picture, the desktop picture becomes a still of the line over a frame of
+/// that same picture while the screen is locked.
+///
+/// A moving (aerial) desktop picture cannot be put back with the public API,
+/// so the system's own wallpaper settings file is copied aside before the
+/// still goes up, and copied back on unlock.
 @MainActor
 final class LockScreen {
     static var isEnabled: Bool {
@@ -16,61 +24,53 @@ final class LockScreen {
     private let line: Line
     private let panel: LinePanel
     private var observers: [NSObjectProtocol] = []
+    private var pendingExport: DispatchWorkItem?
+    /// A frame of the moving desktop picture, read once per video.
+    private var frameCache: (url: URL, image: CGImage)?
 
-    /// The desktop picture to put back. Kept in the user defaults too, so a
-    /// crash while locked still gives it back on the next launch.
-    private struct Original: Codable {
-        var display: UInt32
-        var url: URL
-        var scaling: UInt?
-        var clipping: Bool?
-        var fill: Data?
-    }
-
-    private static let originalKey = "lockScreenOriginal"
-    private var original: Original? {
-        get { UserDefaults.standard.data(forKey: Self.originalKey).flatMap { try? JSONDecoder().decode(Original.self, from: $0) } }
-        set { UserDefaults.standard.set(newValue.flatMap { try? JSONEncoder().encode($0) }, forKey: Self.originalKey) }
-    }
-
-    private static var folder: URL {
+    /// Shared with the screen saver, which reads `line.png` and `state.json`.
+    static var folder: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Tendedero/LockScreen", isDirectory: true)
+    }
+    private static var overlayURL: URL { folder.appendingPathComponent("line.png") }
+    private static var stillURL: URL { folder.appendingPathComponent("still.png") }
+    private static var stateURL: URL { folder.appendingPathComponent("state.json") }
+    private static var backupURL: URL { folder.appendingPathComponent("wallpaper-backup.plist") }
+
+    private static var wallpaperStore: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/com.apple.wallpaper/Store/Index.plist")
     }
 
     init(line: Line, panel: LinePanel) {
         self.line = line
         self.panel = panel
-        restore()
+        // A crash or a quit while locked leaves the still up: put the real picture back.
+        if !Self.screenIsLocked { restore() }
+        export()
 
-        // The lock itself, and the moments that usually come right before it,
-        // so the picture is already in place when the lock screen appears.
         let distributed = DistributedNotificationCenter.default()
-        for name in ["com.apple.screenIsLocked", "com.apple.screensaver.didstart"] {
-            observers.append(distributed.addObserver(forName: .init(name), object: nil, queue: .main) { [weak self] _ in
+        let workspace = NSWorkspace.shared.notificationCenter
+        observers = [
+            distributed.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.apply() }
-            })
-        }
-        observers.append(NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.apply() }
-        })
-
-        observers.append(distributed.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.restore() }
-        })
-        // A screen saver or a dark display that ends without a lock.
-        for name in ["com.apple.screensaver.didstop"] {
-            observers.append(distributed.addObserver(forName: .init(name), object: nil, queue: .main) { [weak self] _ in
+            },
+            // The display going dark usually comes right before the lock.
+            workspace.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.apply() }
+            },
+            distributed.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.restore() }
+            },
+            workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.restoreUnlessLocked() }
-            })
-        }
-        observers.append(NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.restoreUnlessLocked() }
-        })
+            },
+            // A new desktop picture or a new screen: the pictures are redrawn.
+            workspace.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.scheduleExport() }
+            },
+        ]
     }
 
     private static var screenIsLocked: Bool {
@@ -85,126 +85,225 @@ final class LockScreen {
         }
     }
 
+    // MARK: Keeping the pictures current
+
+    /// Called whenever the line changes. Drawing waits for things to settle.
+    func scheduleExport() {
+        pendingExport?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.export() }
+        pendingExport = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
+    }
+
+    /// Draws the line over a clear screen for the screen saver, and over a
+    /// frame of the desktop picture for the password prompt, so locking has
+    /// nothing left to draw.
+    private func export() {
+        guard Self.isEnabled, !Self.screenIsLocked || original == nil,
+              let screen = panel.screen ?? Placement.mainScreen else { return }
+        let fm = FileManager.default
+        try? fm.createDirectory(at: Self.folder, withIntermediateDirectories: true)
+
+        let video = Self.aerialVideo()
+        let overlay = drawLine(on: screen)
+        if let overlay { write(overlay, to: Self.overlayURL) } else { try? fm.removeItem(at: Self.overlayURL) }
+
+        let state: [String: Any] = [
+            "video": video?.path ?? "",
+            "overlay": overlay == nil ? "" : "line.png",
+            "width": screen.frame.width,
+            "height": screen.frame.height,
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: Self.stateURL, options: .atomic)
+        }
+
+        if let overlay, let still = drawStill(on: screen, video: video, overlay: overlay) {
+            write(still, to: Self.stillURL)
+        } else {
+            try? fm.removeItem(at: Self.stillURL)
+        }
+    }
+
     // MARK: Putting the still up and taking it down
+
+    /// Whether the still is up, with the real settings set aside.
+    private var original: URL? {
+        FileManager.default.fileExists(atPath: Self.backupURL.path) ? Self.backupURL : nil
+    }
 
     func apply() {
         guard Self.isEnabled, line.liveCount > 0,
-              let screen = panel.screen ?? Placement.mainScreen,
-              let display = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32
-        else { return }
-        let workspace = NSWorkspace.shared
+              let screen = panel.screen ?? Placement.mainScreen else { return }
+        pendingExport?.cancel()
+        export()
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: Self.stillURL.path) else { return }
 
-        // Already up: the still is redrawn over the saved picture, not over itself.
-        let base: Original
-        if let saved = original {
-            base = saved
-        } else {
-            guard let url = workspace.desktopImageURL(for: screen) else { return }
-            let options = workspace.desktopImageOptions(for: screen) ?? [:]
-            base = Original(
-                display: display, url: url,
-                scaling: (options[.imageScaling] as? NSNumber)?.uintValue,
-                clipping: (options[.allowClipping] as? NSNumber)?.boolValue,
-                fill: (options[.fillColor] as? NSColor).flatMap {
-                    try? NSKeyedArchiver.archivedData(withRootObject: $0, requiringSecureCoding: true)
-                })
-        }
-
-        guard let still = render(on: screen, over: base) else { return }
-        do {
-            try workspace.setDesktopImageURL(still, for: screen, options: [
-                .imageScaling: NSImageScaling.scaleProportionallyUpOrDown.rawValue,
-                .allowClipping: true,
-            ])
-            original = base
-            log.notice("Lock screen: the line is up on display \(display)")
-        } catch {
-            log.error("Lock screen: could not set the desktop picture: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    func restore() {
-        guard let saved = original else { return }
-        let screen = NSScreen.screens.first {
-            $0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32 == saved.display
-        } ?? Placement.mainScreen
-        if let screen {
-            var options: [NSWorkspace.DesktopImageOptionKey: Any] = [:]
-            if let s = saved.scaling { options[.imageScaling] = s }
-            if let c = saved.clipping { options[.allowClipping] = c }
-            if let data = saved.fill,
-               let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data) {
-                options[.fillColor] = color
-            }
+        // Set the real settings aside once; a second lock keeps the first copy.
+        if original == nil {
             do {
-                try NSWorkspace.shared.setDesktopImageURL(saved.url, for: screen, options: options)
-                log.notice("Lock screen: desktop picture restored")
+                try fm.copyItem(at: Self.wallpaperStore, to: Self.backupURL)
             } catch {
-                log.error("Lock screen: could not restore the desktop picture: \(error.localizedDescription, privacy: .public)")
+                log.error("Lock screen: cannot copy the wallpaper settings, leaving them alone: \(error.localizedDescription, privacy: .public)")
                 return
             }
         }
-        original = nil
-        try? FileManager.default.removeItem(at: Self.folder)
+
+        // A new name every time: the system keeps showing an old picture
+        // when the file name stays the same.
+        for old in (try? fm.contentsOfDirectory(at: Self.folder, includingPropertiesForKeys: nil)) ?? []
+        where old.lastPathComponent.hasPrefix("locked-") {
+            try? fm.removeItem(at: old)
+        }
+        let shown = Self.folder.appendingPathComponent("locked-\(UUID().uuidString).png")
+        do {
+            try fm.copyItem(at: Self.stillURL, to: shown)
+            try NSWorkspace.shared.setDesktopImageURL(shown, for: screen, options: [
+                .imageScaling: NSImageScaling.scaleProportionallyUpOrDown.rawValue,
+                .allowClipping: true,
+            ])
+            log.notice("Lock screen: the line is up")
+        } catch {
+            log.error("Lock screen: could not set the desktop picture: \(error.localizedDescription, privacy: .public)")
+            restore()
+        }
     }
 
-    // MARK: Drawing the still
-
-    /// The whole screen: the desktop picture laid out the way the system lays
-    /// it out, and the line where it hangs on that screen.
-    private func render(on screen: NSScreen, over base: Original) -> URL? {
-        let scale = screen.backingScaleFactor
-        let size = screen.frame.size
-        let pixels = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
-        guard let ctx = CGContext(
-            data: nil, width: Int(pixels.width), height: Int(pixels.height), bitsPerComponent: 8, bytesPerRow: 0,
-            space: CGColorSpace(name: CGColorSpace.sRGB)!,
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
-        else { return nil }
-        let canvas = CGRect(origin: .zero, size: pixels)
-
-        let fill = base.fill.flatMap { try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: $0) }
-        ctx.setFillColor((fill ?? NSColor(white: 0.12, alpha: 1)).cgColor)
-        ctx.fill(canvas)
-        if let picture = NSImage(contentsOf: base.url)?.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            let w = CGFloat(picture.width), h = CGFloat(picture.height)
-            // Fill the screen unless the picture is set to fit inside it.
-            let fits = base.clipping == false
-            let s = fits ? min(pixels.width / w, pixels.height / h) : max(pixels.width / w, pixels.height / h)
-            ctx.interpolationQuality = .high
-            ctx.draw(picture, in: CGRect(x: (pixels.width - w * s) / 2, y: (pixels.height - h * s) / 2,
-                                         width: w * s, height: h * s))
-        } else {
-            log.notice("Lock screen: cannot read the desktop picture \(base.url.path, privacy: .public), using a plain background")
+    /// Puts the real wallpaper settings back, moving pictures included, and
+    /// has the wallpaper agent read them again.
+    func restore() {
+        guard let backup = original else { return }
+        let fm = FileManager.default
+        do {
+            _ = try fm.replaceItemAt(Self.wallpaperStore, withItemAt: backup)
+        } catch {
+            log.error("Lock screen: could not put the wallpaper settings back: \(error.localizedDescription, privacy: .public)")
+            return
         }
+        let agent = Process()
+        agent.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        agent.arguments = ["WallpaperAgent"]
+        try? agent.run()
+        agent.waitUntilExit()
+        for old in (try? fm.contentsOfDirectory(at: Self.folder, includingPropertiesForKeys: nil)) ?? []
+        where old.lastPathComponent.hasPrefix("locked-") {
+            try? fm.removeItem(at: old)
+        }
+        log.notice("Lock screen: desktop picture restored")
+    }
 
-        // The line as if it were down, wherever the panel is right now.
+    // MARK: The desktop picture
+
+    /// The video of the moving desktop picture, if one is chosen and downloaded.
+    static func aerialVideo() -> URL? {
+        guard let data = try? Data(contentsOf: wallpaperStore),
+              let store = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        else { return nil }
+        var ids: [String] = []
+        func collect(_ value: Any) {
+            if let dict = value as? [String: Any] {
+                if dict["Provider"] as? String == "com.apple.wallpaper.choice.aerials",
+                   let config = dict["Configuration"] as? Data,
+                   let parsed = try? PropertyListSerialization.propertyList(from: config, format: nil) as? [String: Any],
+                   let id = parsed["assetID"] as? String {
+                    ids.append(id)
+                }
+                // The idle (screen saver) choice is not the desktop picture.
+                for (key, child) in dict.sorted(by: { $0.key < $1.key }) where key != "Idle" { collect(child) }
+            } else if let list = value as? [Any] {
+                list.forEach(collect)
+            }
+        }
+        // The setting for every Space and display wins over the older ones.
+        for key in ["AllSpacesAndDisplays", "Displays", "Spaces", "SystemDefault"] {
+            if let part = store[key] { collect(part) }
+        }
+        let root = URL(fileURLWithPath: "/Library/Application Support/com.apple.idleassetsd/Customer")
+        let folders = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+        for id in ids {
+            for folder in folders {
+                let file = folder.appendingPathComponent("\(id).mov")
+                if FileManager.default.isReadableFile(atPath: file.path) { return file }
+            }
+        }
+        return nil
+    }
+
+    /// A frame of the moving picture, or the still desktop picture.
+    private func background(for screen: NSScreen, video: URL?) -> CGImage? {
+        if let video {
+            if let cached = frameCache, cached.url == video { return cached.image }
+            let generator = AVAssetImageGenerator(asset: AVURLAsset(url: video))
+            generator.appliesPreferredTrackTransform = true
+            generator.requestedTimeToleranceBefore = .positiveInfinity
+            generator.requestedTimeToleranceAfter = .positiveInfinity
+            if let frame = try? generator.copyCGImage(at: .zero, actualTime: nil) {
+                frameCache = (video, frame)
+                return frame
+            }
+        }
+        guard let url = NSWorkspace.shared.desktopImageURL(for: screen),
+              !url.lastPathComponent.hasPrefix("locked-") else { return nil }
+        return NSImage(contentsOf: url)?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+    }
+
+    // MARK: Drawing
+
+    private static func context(_ pixels: CGSize) -> CGContext? {
+        CGContext(data: nil, width: Int(pixels.width), height: Int(pixels.height), bitsPerComponent: 8, bytesPerRow: 0,
+                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+    }
+
+    private static func pixels(of screen: NSScreen) -> CGSize {
+        let scale = screen.backingScaleFactor
+        return CGSize(width: (screen.frame.width * scale).rounded(), height: (screen.frame.height * scale).rounded())
+    }
+
+    /// The whole screen, clear, with the line where it hangs as if it were down.
+    private func drawLine(on screen: NSScreen) -> CGImage? {
+        let items = line.items.filter { !$0.falling }
+        guard !items.isEmpty, let ctx = Self.context(Self.pixels(of: screen)) else { return nil }
+        let scale = screen.backingScaleFactor
         let width = panel.frame.width
         let height = Layout.panelHeight + Placement.topOffset
-        let renderer = ImageRenderer(content: StillLine(items: line.items.filter { !$0.falling },
-                                                       width: width, topOffset: Placement.topOffset))
+        let renderer = ImageRenderer(content: StillLine(items: items, width: width, topOffset: Placement.topOffset))
         renderer.proposedSize = ProposedViewSize(width: width, height: height)
         renderer.scale = scale
         guard let still = renderer.cgImage else { return nil }
         let origin = CGPoint(x: (panel.frame.minX - screen.frame.minX) * scale,
                              y: (panel.frame.maxY - height - screen.frame.minY) * scale)
         ctx.draw(still, in: CGRect(origin: origin, size: CGSize(width: width * scale, height: height * scale)))
+        return ctx.makeImage()
+    }
 
-        guard let image = ctx.makeImage() else { return nil }
-        let rep = NSBitmapImageRep(cgImage: image)
-        guard let png = rep.representation(using: .png, properties: [:]) else { return nil }
-        // A new name every time: the system keeps showing an old picture
-        // when the file name stays the same.
-        let folder = Self.folder
-        try? FileManager.default.removeItem(at: folder)
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let url = folder.appendingPathComponent("line-\(UUID().uuidString).png")
+    /// The desktop picture filling the screen, and the line over it.
+    private func drawStill(on screen: NSScreen, video: URL?, overlay: CGImage) -> CGImage? {
+        let pixels = Self.pixels(of: screen)
+        guard let ctx = Self.context(pixels) else { return nil }
+        let canvas = CGRect(origin: .zero, size: pixels)
+        ctx.setFillColor(NSColor.black.cgColor)
+        ctx.fill(canvas)
+        if let picture = background(for: screen, video: video) {
+            let w = CGFloat(picture.width), h = CGFloat(picture.height)
+            let s = max(pixels.width / w, pixels.height / h)
+            ctx.interpolationQuality = .high
+            ctx.draw(picture, in: CGRect(x: (pixels.width - w * s) / 2, y: (pixels.height - h * s) / 2,
+                                         width: w * s, height: h * s))
+        } else {
+            log.notice("Lock screen: no desktop picture to draw, using black")
+        }
+        ctx.draw(overlay, in: canvas)
+        return ctx.makeImage()
+    }
+
+    private func write(_ image: CGImage, to url: URL) {
+        guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { return }
         do {
-            try png.write(to: url)
-            return url
+            try png.write(to: url, options: .atomic)
         } catch {
-            log.error("Lock screen: could not write the still: \(error.localizedDescription, privacy: .public)")
-            return nil
+            log.error("Lock screen: could not write \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 }

@@ -84,7 +84,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         line.$items
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.itemsChanged() }
+            .sink { [weak self] _ in
+                self?.itemsChanged()
+                self?.lockScreen.scheduleExport()
+            }
             .store(in: &cancellables)
 
         // Entering or leaving full screen switches Space. Check again once the
@@ -105,6 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             MainActor.assumeIsolated {
                 self?.panel.placeOnScreen()
                 self?.updateCapacity()
+                self?.lockScreen.scheduleExport()
             }
         }
 
@@ -623,6 +627,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func setTopOffset(_ value: CGFloat) {
         Placement.topOffset = value.rounded()
         line.topOffset = Placement.topOffset
+        lockScreen.scheduleExport()
         panel.placeOnScreen(panel.screen)
         wanted = true
         refresh()
