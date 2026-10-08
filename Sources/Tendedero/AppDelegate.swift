@@ -645,13 +645,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 final class SliderMenuView: NSView {
     private let onChange: (Double) -> Void
     private let unit: String
+    private let format: ((Double) -> String)?
     private let slider: NSSlider
     private let valueLabel = NSTextField(labelWithString: "")
 
     init(title: String, value: Double, range: ClosedRange<Double>, unit: String = " pt",
-         onChange: @escaping (Double) -> Void) {
+         format: ((Double) -> String)? = nil, onChange: @escaping (Double) -> Void) {
         self.onChange = onChange
         self.unit = unit
+        self.format = format
         slider = NSSlider(value: value, minValue: range.lowerBound, maxValue: range.upperBound, target: nil, action: nil)
         super.init(frame: NSRect(x: 0, y: 0, width: 240, height: 48))
 
@@ -684,7 +686,7 @@ final class SliderMenuView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     private func showValue() {
-        valueLabel.stringValue = "\(Int(slider.doubleValue.rounded()))\(unit)"
+        valueLabel.stringValue = format?(slider.doubleValue) ?? "\(Int(slider.doubleValue.rounded()))\(unit)"
     }
 
     @objc private func changed() {

@@ -160,6 +160,10 @@ enum GarlandLight {
 final class Garlands: ObservableObject {
     @Published private(set) var items: [Garland] = []
     @Published var editing = false
+    /// How every garland looks. Saved as soon as it changes.
+    @Published var style = GarlandStyle.defaults {
+        didSet { saveStyle() }
+    }
 
     var visible: Bool {
         get { !UserDefaults.standard.bool(forKey: "garlandsHidden") }
@@ -179,11 +183,22 @@ final class Garlands: ObservableObject {
     }
 
     private let storeKey = "garlands"
+    private let styleKey = "garlandStyle"
 
     init() {
         if let data = UserDefaults.standard.data(forKey: storeKey),
            let saved = try? JSONDecoder().decode([Garland].self, from: data) {
             items = saved
+        }
+        if let data = UserDefaults.standard.data(forKey: styleKey),
+           let saved = try? JSONDecoder().decode(GarlandStyle.self, from: data) {
+            style = saved
+        }
+    }
+
+    private func saveStyle() {
+        if let data = try? JSONEncoder().encode(style) {
+            UserDefaults.standard.set(data, forKey: styleKey)
         }
     }
 

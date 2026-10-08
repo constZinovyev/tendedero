@@ -90,6 +90,66 @@ final class GarlandController {
         }
         behind.state = store.behindWindows ? .on : .off
         menu.addItem(behind)
+
+        let look = NSMenuItem(title: L("Appearance", "Aspecto"), action: nil, keyEquivalent: "")
+        look.submenu = appearanceMenu()
+        menu.addItem(look)
+        return menu
+    }
+
+    /// The look of every garland: the bulb design and its details. Changes
+    /// show on the screen at once, so the garlands come out while you tune.
+    private func appearanceMenu() -> NSMenu {
+        let menu = NSMenu()
+        let store = store
+        let style = store.style
+
+        for design in GarlandStyle.Design.allCases {
+            let item = ClosureMenuItem(design.title) { store.style.design = design }
+            item.state = style.design == design ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+
+        func slider(_ title: String, _ value: CGFloat, _ range: ClosedRange<Double>, unit: String = " pt",
+                    scale: Double = 1, format: ((Double) -> String)? = nil,
+                    set: @escaping (inout GarlandStyle, CGFloat) -> Void) {
+            let item = NSMenuItem()
+            item.view = SliderMenuView(title: title, value: Double(value) * scale, range: range, unit: unit,
+                                       format: format) { v in
+                set(&store.style, CGFloat(v / scale))
+            }
+            menu.addItem(item)
+        }
+
+        slider(L("Bulb size", "Tamaño"), style.bulbSize, 20...100, scale: 10,
+               format: { String(format: "%.1f pt", $0 / 10) }) { $0.bulbSize = $1 }
+        slider(L("Glass clarity", "Transparencia del cristal"), style.glassClarity, 0...100, unit: "%", scale: 100) { $0.glassClarity = $1 }
+        slider(L("Filament", "Filamento"), style.filament, 10...100, unit: "%", scale: 100) { $0.filament = $1 }
+        slider(L("Halo size", "Tamaño del halo"), style.haloSize, 0...80, scale: 10,
+               format: { String(format: "%.1f×", $0 / 10) }) { $0.haloSize = $1 }
+        slider(L("Halo strength", "Intensidad del halo"), style.haloStrength, 0...150, unit: "%", scale: 100) { $0.haloStrength = $1 }
+        slider(L("Warmth", "Calidez"), style.warmth, 18...52, unit: "°") { $0.warmth = $1 }
+        menu.addItem(.separator())
+
+        let strands = NSMenuItem(title: L("Wire strands", "Hilos del cable"), action: nil, keyEquivalent: "")
+        let strandMenu = NSMenu()
+        for n in 1...3 {
+            let item = ClosureMenuItem("\(n)") { store.style.strands = n }
+            item.state = style.strands == n ? .on : .off
+            strandMenu.addItem(item)
+        }
+        strands.submenu = strandMenu
+        menu.addItem(strands)
+        slider(L("Wire thickness", "Grosor del cable"), style.wireWidth, 5...30, scale: 10,
+               format: { String(format: "%.1f pt", $0 / 10) }) { $0.wireWidth = $1 }
+        slider(L("Twist", "Torsión"), style.twistPitch, 6...60) { $0.twistPitch = $1 }
+        slider(L("Lead length", "Largo del colgante"), style.lead, 0...14) { $0.lead = $1 }
+
+        menu.addItem(.separator())
+        let reset = ClosureMenuItem(L("Reset to defaults", "Restablecer")) { store.style = .defaults }
+        reset.isEnabled = style != .defaults
+        menu.addItem(reset)
         return menu
     }
 }
@@ -193,7 +253,7 @@ final class GarlandEditView: NSView {
 
     func reload() {
         let scale = window?.backingScaleFactor ?? 2
-        layers.render(store.items, origin: screenFrame.origin, scale: scale)
+        layers.render(store.items, style: store.style, origin: screenFrame.origin, scale: scale)
         doneButton.isHidden = !store.editing || !screenFrame.contains(NSEvent.mouseLocation) && NSScreen.screens.count > 1
         drawHandles()
     }
@@ -228,7 +288,7 @@ final class GarlandEditView: NSView {
 
     /// What is under the pointer, handles first, the topmost garland first.
     private func hit(_ p: CGPoint) -> Target? {
-        let style = GarlandStyle.current
+        let style = store.style
         for g in store.items.reversed() {
             if hypot(g.start.x - p.x, g.start.y - p.y) <= Self.grab { return .start(g.id) }
             if hypot(g.end.x - p.x, g.end.y - p.y) <= Self.grab { return .end(g.id) }
@@ -238,8 +298,8 @@ final class GarlandEditView: NSView {
         for g in store.items.reversed() {
             let geo = GarlandGeometry(g)
             for (i, b) in geo.bulbPositions(spacing: g.spacing).enumerated() {
-                let c = CGPoint(x: b.x, y: b.y - style.drop)
-                if hypot(c.x - p.x, c.y - p.y) <= style.bulbSize + 5 { return .bulb(g.id, i) }
+                let c = style.bulbCenter(below: b)
+                if hypot(c.x - p.x, c.y - p.y) <= style.bulbSize * 1.3 + 4 { return .bulb(g.id, i) }
             }
             if geo.distance(to: p) <= 8 { return .wire(g.id, g.start, g.end) }
         }
