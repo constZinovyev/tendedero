@@ -126,10 +126,17 @@ final class CandleLayers {
             let top = foot.y + u * 7 * c.height
             let halo = Sprite.layer(pics.halo.image, rect: pics.halo.rect,
                                     at: CGPoint(x: foot.x, y: top + u * 0.8), scale: scale)
-            breathe(halo, around: 0.9, style: style, seed: c.seed * 29 + 11, duration: 1.3 + Double(c.seed) * 0.29)
+            let flicker = Flicker(seed: c.seed)
+            // The halo swells and dims with the flame.
+            if style.flicker > 0.01, style.halo > 0.01 {
+                let f = Double(style.flicker)
+                halo.add(flicker.animation("opacity", around: 0.86, by: 0.14 * f), forKey: "flicker")
+                halo.add(flicker.animation("transform.scale", around: 1, by: 0.05 * f), forKey: "swell")
+            }
             halos.append(halo)
             still.addSublayer(Sprite.layer(pics.candles[i].image, rect: pics.candles[i].rect, at: foot, scale: scale))
-            flames.append(flame(pics.flames[i], at: CGPoint(x: foot.x, y: top + u * 0.02), style: style, seed: c.seed))
+            flames.append(flame(pics.flames[i], at: CGPoint(x: foot.x, y: top + u * 0.02), style: style,
+                                seed: c.seed, flicker: flicker))
         }
         // The candles never change once drawn: cache them as one bitmap.
         still.shouldRasterize = true
@@ -381,9 +388,11 @@ final class CandleLayers {
 
     // MARK: Motion
 
-    /// The flame sways from its base on one loop and stretches on another,
-    /// with its brightness wavering on a third.
-    private func flame(_ pic: (rect: CGRect, image: CGImage?), at tip: CGPoint, style st: CandleStyle, seed: Int) -> CALayer {
+    /// The flame sways from its base on a slow loop of its own, and on the
+    /// candle's flicker it stretches taller and burns brighter, together,
+    /// as a real flame does; its halo follows the same flicker.
+    private func flame(_ pic: (rect: CGRect, image: CGImage?), at tip: CGPoint, style st: CandleStyle,
+                       seed: Int, flicker: Flicker) -> CALayer {
         let sway = CALayer()
         sway.bounds = CGRect(origin: .zero, size: pic.rect.size)
         sway.anchorPoint = CGPoint(x: -pic.rect.minX / pic.rect.width, y: pic.rect.maxY / pic.rect.height)
@@ -395,16 +404,9 @@ final class CandleLayers {
         guard f > 0.01 else { return sway }
         var r = SeededRandom(seed: seed * 13 + 5)
         sway.add(loop("transform.rotation.z", around: 0, by: 0.1 * f, duration: 2.3 + Double(seed) * 0.37, random: &r), forKey: "sway")
-        stretch.add(loop("transform.scale.y", around: 1, by: 0.12 * f, duration: 1.7 + Double(seed) * 0.23, random: &r), forKey: "stretch")
-        stretch.add(loop("opacity", around: 0.94, by: 0.06 * f, duration: 1.1 + Double(seed) * 0.17, random: &r), forKey: "glow")
+        stretch.add(flicker.animation("transform.scale.y", around: 1, by: 0.12 * f), forKey: "stretch")
+        stretch.add(flicker.animation("opacity", around: 0.92, by: 0.08 * f), forKey: "glow")
         return sway
-    }
-
-    private func breathe(_ layer: CALayer, around center: Double, style st: CandleStyle, seed: Int, duration: Double) {
-        let f = Double(st.flicker)
-        guard f > 0.01, st.halo > 0.01 else { return }
-        var r = SeededRandom(seed: seed)
-        layer.add(loop("opacity", around: center, by: 0.1 * f, duration: duration, random: &r), forKey: "breathe")
     }
 
     /// A repeating, uneven wobble: a dozen random values around a centre,
@@ -421,6 +423,44 @@ final class CandleLayers {
         a.repeatCount = .infinity
         a.isRemovedOnCompletion = false
         a.beginTime = CACurrentMediaTime() - r.next() * duration
+        a.calm()
+        return a
+    }
+}
+
+/// One candle's flicker: a single uneven curve of intensity from -1 to 1,
+/// shared by the flame's height and brightness and by its halo, so they
+/// rise and fall together. A slow breath, a quicker waver and small random
+/// jumps, built from whole cycles so the loop has no seam.
+@MainActor
+struct Flicker {
+    let values: [Double]
+    let duration: Double
+    let begin: CFTimeInterval
+
+    init(seed: Int) {
+        var r = SeededRandom(seed: seed * 31 + 7)
+        let steps = 30
+        let p1 = r.next() * 2 * .pi, p2 = r.next() * 2 * .pi
+        var v = (0..<steps).map { k -> Double in
+            let t = 2 * Double.pi * Double(k) / Double(steps)
+            let n = 0.55 * sin(2 * t + p1) + 0.3 * sin(5 * t + p2) + 0.35 * (r.next() * 2 - 1)
+            return min(1, max(-1, n))
+        }
+        v.append(v[0])
+        values = v
+        duration = 2.4 + Double(seed) * 0.33
+        begin = CACurrentMediaTime() - r.next() * duration
+    }
+
+    func animation(_ keyPath: String, around center: Double, by amount: Double) -> CAKeyframeAnimation {
+        let a = CAKeyframeAnimation(keyPath: keyPath)
+        a.values = values.map { center + $0 * amount }
+        a.calculationMode = .cubic
+        a.duration = duration
+        a.repeatCount = .infinity
+        a.isRemovedOnCompletion = false
+        a.beginTime = begin
         a.calm()
         return a
     }

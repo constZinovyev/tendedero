@@ -380,18 +380,20 @@ final class DecorView: NSView {
     }
 
     /// Freezes or resumes every animation in this window.
+    /// Pausing freezes the current frame; resuming puts the layer back on
+    /// the system clock. The loops just carry on from there: shifting the
+    /// clock by the time spent paused would make every animation added
+    /// later start that far in the future, so after a night behind other
+    /// windows the flames would stand still.
     func setPaused(_ paused: Bool) {
         guard let layer, (layer.speed == 0) != paused else { return }
         if paused {
-            let t = layer.convertTime(CACurrentMediaTime(), from: nil)
+            layer.timeOffset = layer.convertTime(CACurrentMediaTime(), from: nil)
             layer.speed = 0
-            layer.timeOffset = t
         } else {
-            let t = layer.timeOffset
             layer.speed = 1
             layer.timeOffset = 0
             layer.beginTime = 0
-            layer.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil) - t
         }
     }
 
