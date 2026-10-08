@@ -25,6 +25,8 @@ final class LockScreen {
     private let panel: LinePanel
     private var observers: [NSObjectProtocol] = []
     private var pendingExport: DispatchWorkItem?
+    /// The desktop video the pictures were last drawn over.
+    private var exportedVideo: URL?
     /// A frame of the moving desktop picture, read once per video.
     private var frameCache: (url: URL, image: CGImage)?
 
@@ -90,7 +92,10 @@ final class LockScreen {
     /// Called whenever the line changes. Drawing waits for things to settle.
     func scheduleExport() {
         pendingExport?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.export() }
+        let work = DispatchWorkItem { [weak self] in
+            self?.pendingExport = nil
+            self?.export()
+        }
         pendingExport = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
     }
@@ -105,6 +110,7 @@ final class LockScreen {
         try? fm.createDirectory(at: Self.folder, withIntermediateDirectories: true)
 
         let video = Self.aerialVideo()
+        exportedVideo = video
         let overlay = drawLine(on: screen)
         if let overlay { write(overlay, to: Self.overlayURL) } else { try? fm.removeItem(at: Self.overlayURL) }
 
@@ -135,8 +141,12 @@ final class LockScreen {
     func apply() {
         guard Self.isEnabled, line.liveCount > 0,
               let screen = panel.screen ?? Placement.mainScreen else { return }
-        pendingExport?.cancel()
-        export()
+        // The pictures are kept current ahead of time, so locking only has
+        // to put one up. Drawing it now would hold the line back by a second.
+        if pendingExport.map({ !$0.isCancelled }) == true || Self.aerialVideo() != exportedVideo {
+            pendingExport?.cancel()
+            export()
+        }
         let fm = FileManager.default
         guard fm.fileExists(atPath: Self.stillURL.path) else { return }
 
@@ -264,7 +274,7 @@ final class LockScreen {
     /// How far down the screen the line hangs while locked, as a fraction of
     /// the screen's height: below the big clock of the lock screen. Fixed,
     /// whatever distance from the top the line has on the desktop.
-    static let lockedTop: CGFloat = 0.30
+    static let lockedTop: CGFloat = 0.22
 
     /// The whole screen, clear, with the line as if it were down: across the
     /// same stretch as on the desktop, at the locked height.
