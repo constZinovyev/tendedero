@@ -21,7 +21,7 @@ struct GarlandStyle: Codable, Equatable {
 
     var design: Design = .glass
     /// The bulb's scale: about its half height, in points.
-    var bulbSize: CGFloat = 5
+    var bulbSize: CGFloat = 4
     /// How clear the glass is: 1 lets the background through, 0 is milky.
     var glassClarity: CGFloat = 0.7
     /// How hot the filament glows, 0 to 1.
@@ -29,7 +29,7 @@ struct GarlandStyle: Codable, Equatable {
     /// The halo of light around each bulb, as a multiple of the bulb's size.
     var haloSize: CGFloat = 4.5
     /// How strong the halo is, 0 to 1.5.
-    var haloStrength: CGFloat = 0.9
+    var haloStrength: CGFloat = 1.35
     /// Hue of the light in degrees: lower is more orange, higher more yellow.
     var warmth: CGFloat = 36
 
@@ -39,7 +39,7 @@ struct GarlandStyle: Codable, Equatable {
     /// Length of one full twist of the strands.
     var twistPitch: CGFloat = 16
     /// The short lead each bulb hangs from, below the wire.
-    var lead: CGFloat = 4
+    var lead: CGFloat = 3
 
     static let defaults = GarlandStyle()
 

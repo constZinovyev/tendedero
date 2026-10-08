@@ -13,7 +13,7 @@ struct Garland: Codable, Identifiable, Equatable {
     /// How far the middle hangs below the straight line between the ends.
     var sag: CGFloat = 45
     /// Distance between bulbs along the wire.
-    var spacing: CGFloat = 34
+    var spacing: CGFloat = 44
     var brightness: Double = 0.85
     var mode: Mode = .on
     /// 1 is the normal pace of blinking and of the wave.
