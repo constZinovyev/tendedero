@@ -576,7 +576,7 @@ final class CandleLayers {
         }
         var currentLean: Double { Self.value(lean, since: leanStart) }
         /// How smothered the flame is now, 0 to 1.
-        var currentDip: Double { -Self.value(dip, since: dipStart) / 0.85 }
+        var currentDip: Double { -Self.value(dip, since: dipStart) / 0.75 }
     }
 
     /// A hand passing by. Each flame within reach leans the way the air
@@ -600,7 +600,7 @@ final class CandleLayers {
             // At most 30 new curves a second, however fast the mouse reports.
             guard now - max(wind.leanStart, wind.dipStart) >= Wind.step else { continue }
             let near = pow(1 - d / reach, 1.6)
-            let strength = min(1.2, Double(speed) / 700) * Double(near)
+            let strength = min(1.2, Double(speed) / 800) * Double(near)
             guard strength > 0.03 else { continue }
             var rnd = SeededRandom(seed: Int(now * 1000) &+ i)
 
@@ -608,7 +608,7 @@ final class CandleLayers {
             // which is negative with y up. Mostly sideways air leans it most.
             let sideways = Double(v.dx / max(speed, 1))
             let lean = wind.currentLean
-            let target = max(-0.8, min(0.8, lean - sideways * 0.75 * strength))
+            let target = max(-0.65, min(0.65, lean - sideways * 0.6 * strength))
             if abs(target - lean) > 0.04 || abs(lean) < 0.02 {
                 let curve = Self.leanCurve(from: lean, to: target, rough: strength, random: &rnd)
                 winds[i].lean = curve
@@ -616,9 +616,12 @@ final class CandleLayers {
                 parts[i].sway.add(windAnimation("transform.rotation.z", curve), forKey: "wind")
             }
 
-            // Smothering adds up with every gust and fades on its own.
-            let smothered = min(1, wind.currentDip + strength * 0.45)
-            if smothered > wind.currentDip + 0.03 {
+            // Smothering builds up over time, only in fast air close by:
+            // about one and a half to two seconds of fast waving bring the
+            // flame near out. Slower air only bends it. It fades on its own.
+            let fast = max(0, strength - 0.35)
+            let smothered = min(1, wind.currentDip + fast * Wind.step * 0.9)
+            if smothered > wind.currentDip + 0.005 {
                 let curve = Self.dipCurve(from: wind.currentDip, to: smothered)
                 winds[i].dip = curve
                 winds[i].dipStart = now
@@ -659,16 +662,16 @@ final class CandleLayers {
     /// flare before settling. In additive scale, 0 is the flame as it is.
     private static func dipCurve(from a: Double, to b: Double) -> [Double] {
         let step = Wind.step
-        let depth = 0.85
+        let depth = 0.75
         let down = (0...3).map { i -> Double in
             let t = Double(i) / 3
             return -depth * (a + (b - a) * t)
         }
         // Stays low a moment, then rises with an ease-in-out to a flare.
-        let hold = Int((0.15 + 0.35 * b) / step)
-        let rise = Int((0.5 + 0.9 * b) / step)
+        let hold = max(1, Int((0.05 + 0.1 * b) / step))
+        let rise = max(2, Int((0.3 + 0.4 * b) / step))
         let settle = Int(0.4 / step)
-        let low = -depth * b, flare = 0.1 * b
+        let low = -depth * b, flare = 0.07 * b
         let held = Array(repeating: low, count: hold)
         let up = (1...rise).map { i -> Double in
             let t = Double(i) / Double(rise)
