@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var signalSources: [DispatchSourceSignal] = []
     private var hotKeys: [HotKey] = []
     private var garlands: GarlandController!
+    private var lockScreen: LockScreen!
     private var cancellables = Set<AnyCancellable>()
     /// Watching the pointer: event monitors, so nothing runs while the
     /// mouse is still, and one timer for the next delayed decision.
@@ -80,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setUpStatusItem()
         garlands = GarlandController()
         garlands.lineWindow = { [weak self] in self?.panel }
+        lockScreen = LockScreen(line: line, panel: panel, decorations: garlands.store)
         watchMenuBarClicks()
 
         Markup.shared.onSaved = { [weak self] url in self?.line.reloadThumbnail(for: url) }
@@ -91,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .sink { [weak self] _ in
                 guard let self else { return }
                 self.itemsChanged()
+                self.lockScreen.scheduleExport()
                 Backup.schedule(self.line)
             }
             .store(in: &cancellables)
@@ -113,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             MainActor.assumeIsolated {
                 self?.panel.placeOnScreen()
                 self?.updateCapacity()
+                self?.lockScreen.scheduleExport()
             }
         }
 
@@ -139,6 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         if Inbox.isEnabled { Inbox.restore() }
+        lockScreen.restore()
     }
 
     // MARK: Inbox mode
@@ -192,8 +197,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for sig in [SIGTERM, SIGINT, SIGHUP] {
             signal(sig, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-            source.setEventHandler {
+            source.setEventHandler { [weak self] in
                 if Inbox.isEnabled { Inbox.restore() }
+                self?.lockScreen.restore()
                 exit(0)
             }
             source.resume()
@@ -646,6 +652,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         behind.toolTip = L("The line hangs on the desktop, under every window",
                            "El tendedero se cuelga en el escritorio, bajo todas las ventanas")
         menu.addItem(behind)
+
+        let locked = ClosureMenuItem(L("On the lock screen", "En la pantalla de bloqueo")) {
+            LockScreen.isEnabled.toggle()
+        }
+        locked.state = LockScreen.isEnabled ? .on : .off
+        locked.toolTip = L("While the Mac is locked, the desktop picture shows the line as it hangs",
+                           "Con el Mac bloqueado, el fondo de escritorio muestra el tendedero tal como está")
+        menu.addItem(locked)
 
         let offset = NSMenuItem()
         offset.view = SliderMenuView(
