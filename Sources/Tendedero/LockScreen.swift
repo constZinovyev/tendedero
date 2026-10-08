@@ -261,19 +261,26 @@ final class LockScreen {
         return CGSize(width: (screen.frame.width * scale).rounded(), height: (screen.frame.height * scale).rounded())
     }
 
-    /// The whole screen, clear, with the line where it hangs as if it were down.
+    /// How far down the screen the line hangs while locked, as a fraction of
+    /// the screen's height: below the big clock of the lock screen. Fixed,
+    /// whatever distance from the top the line has on the desktop.
+    static let lockedTop: CGFloat = 0.30
+
+    /// The whole screen, clear, with the line as if it were down: across the
+    /// same stretch as on the desktop, at the locked height.
     private func drawLine(on screen: NSScreen) -> CGImage? {
         let items = line.items.filter { !$0.falling }
         guard !items.isEmpty, let ctx = Self.context(Self.pixels(of: screen)) else { return nil }
         let scale = screen.backingScaleFactor
         let width = panel.frame.width
-        let height = Layout.panelHeight + Placement.topOffset
-        let renderer = ImageRenderer(content: StillLine(items: items, width: width, topOffset: Placement.topOffset))
+        let height = Layout.panelHeight
+        let renderer = ImageRenderer(content: StillLine(items: items, width: width, topOffset: 0))
         renderer.proposedSize = ProposedViewSize(width: width, height: height)
         renderer.scale = scale
         guard let still = renderer.cgImage else { return nil }
+        let top = (screen.frame.height * Self.lockedTop).rounded()
         let origin = CGPoint(x: (panel.frame.minX - screen.frame.minX) * scale,
-                             y: (panel.frame.maxY - height - screen.frame.minY) * scale)
+                             y: (screen.frame.height - top - height) * scale)
         ctx.draw(still, in: CGRect(origin: origin, size: CGSize(width: width * scale, height: height * scale)))
         return ctx.makeImage()
     }

@@ -627,7 +627,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func setTopOffset(_ value: CGFloat) {
         Placement.topOffset = value.rounded()
         line.topOffset = Placement.topOffset
-        lockScreen.scheduleExport()
         panel.placeOnScreen(panel.screen)
         wanted = true
         refresh()
