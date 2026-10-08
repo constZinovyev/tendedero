@@ -11,8 +11,9 @@ enum Sprite {
     /// Draws into a bitmap of `rect` (in points), with y growing downward
     /// like the design pages' canvas, so their drawing code ports directly.
     static func draw(_ rect: CGRect, scale: CGFloat, _ body: (CGContext) -> Void) -> CGImage? {
-        let w = max(1, Int((rect.width * scale).rounded(.up)))
-        let h = max(1, Int((rect.height * scale).rounded(.up)))
+        let rect = aligned(rect, scale: scale)
+        let w = max(1, Int((rect.width * scale).rounded()))
+        let h = max(1, Int((rect.height * scale).rounded()))
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
@@ -51,14 +52,30 @@ enum Sprite {
     /// (0, 0) lands on `anchor` (AppKit coordinates). `rect` is the rect the
     /// sprite was drawn for, in its local y-down coordinates.
     static func layer(_ image: CGImage?, rect: CGRect, at anchor: CGPoint, scale: CGFloat) -> CALayer {
+        let rect = aligned(rect, scale: scale)
         let layer = CALayer()
         layer.contents = image
         layer.contentsScale = scale
         layer.bounds = CGRect(origin: .zero, size: rect.size)
         // The local origin, measured in the layer's own y-up unit space.
         layer.anchorPoint = CGPoint(x: -rect.minX / rect.width, y: rect.maxY / rect.height)
-        layer.position = anchor
+        layer.position = snap(anchor, scale: scale)
         return layer
+    }
+
+    /// A sprite's rect grown out to whole device pixels. The bitmap and the
+    /// layer showing it then match pixel for pixel: a layer a fraction of a
+    /// pixel off in size or place would be resampled, and every sprite would
+    /// look slightly soft.
+    static func aligned(_ rect: CGRect, scale: CGFloat) -> CGRect {
+        let minX = (rect.minX * scale).rounded(.down) / scale, minY = (rect.minY * scale).rounded(.down) / scale
+        let maxX = (rect.maxX * scale).rounded(.up) / scale, maxY = (rect.maxY * scale).rounded(.up) / scale
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    /// A point on the device pixel grid.
+    static func snap(_ p: CGPoint, scale: CGFloat) -> CGPoint {
+        CGPoint(x: (p.x * scale).rounded() / scale, y: (p.y * scale).rounded() / scale)
     }
 
     // MARK: Drawing helpers, in the canvas' terms

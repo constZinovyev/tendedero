@@ -426,13 +426,15 @@ final class CandleLayers {
         let glow: CGImage?
     }
 
-    static let flameFrames = 24
+    /// Played 24 a second, so the flame changes shape smoothly.
+    static let flameFrames = 48
 
     private static func flamePictures(u: CGFloat, style st: CandleStyle, scale: CGFloat) -> FlamePictures {
         let w = st.warmth
         let h = u * 1.95, fw = u * 0.31
         let pad = u * 0.9
-        let rect = CGRect(x: -fw * 2.4 - pad, y: -h * 1.2 - pad, width: (fw * 2.4 + pad) * 2, height: h * 1.2 + u * 0.4 + pad * 2)
+        let rect = Sprite.aligned(CGRect(x: -fw * 2.4 - pad, y: -h * 1.2 - pad, width: (fw * 2.4 + pad) * 2,
+                                         height: h * 1.2 + u * 0.4 + pad * 2), scale: scale)
         /// A flame of half width `ww` and height `hh`, its tip moved `tip`
         /// sideways, `waist` how far in its upper sides come.
         /// Round at the bottom, widest a third of the way up, then drawn
@@ -471,7 +473,8 @@ final class CandleLayers {
             let tall = 1 + 0.09 * sin(2 * t + 1.3) + 0.05 * sin(5 * t + 0.4)
             let wide = 1 - 0.07 * sin(2 * t + 1.3) + 0.04 * sin(4 * t + 2.8)
             let waist = 0.85 + 0.08 * sin(3 * t + 5.1)
-            let main = soft(max(0.3, u * 0.05)) { ctx in
+            // Little blur: soft edges, but the bright core stays crisp.
+            let main = soft(max(0.25, u * 0.025)) { ctx in
                 Sprite.clipped(ctx, shape(fw * wide, h * tall, tip: tip, waist: waist)) {
                     // Dim and see-through by the wick, bright yellow in the
                     // middle, deepening to orange and fading at the point.
@@ -482,7 +485,7 @@ final class CandleLayers {
                     ])
                 }
             }
-            let core = soft(max(0.3, u * 0.07)) { ctx in
+            let core = soft(max(0.25, u * 0.04)) { ctx in
                 // The white-hot core sits a little above the wick.
                 let lift = u * 0.2
                 Sprite.clipped(ctx, shape(fw * 0.42 * wide, h * 0.6 * tall, tip: tip * 0.5, waist: waist, dy: -lift)) {
@@ -511,7 +514,7 @@ final class CandleLayers {
         let sway = CALayer()
         sway.bounds = CGRect(origin: .zero, size: rect.size)
         sway.anchorPoint = CGPoint(x: -rect.minX / rect.width, y: rect.maxY / rect.height)
-        sway.position = tip
+        sway.position = Sprite.snap(tip, scale: scale)
         let stretch = CALayer()
         stretch.bounds = sway.bounds
         stretch.anchorPoint = sway.anchorPoint
@@ -530,7 +533,7 @@ final class CandleLayers {
         let shape = CAKeyframeAnimation(keyPath: "contents")
         shape.values = pic.frames
         shape.calculationMode = .discrete
-        shape.duration = Double(pic.frames.count) / 12 * (0.9 + 0.12 * Double(seed))
+        shape.duration = Double(pic.frames.count) / 24 * (0.9 + 0.12 * Double(seed))
         shape.repeatCount = .infinity
         shape.isRemovedOnCompletion = false
         shape.beginTime = CACurrentMediaTime() - r.next() * shape.duration
