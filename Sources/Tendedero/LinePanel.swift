@@ -53,8 +53,11 @@ final class LinePanel: NSPanel {
 
     /// Over every window, or just above the desktop icons and under every window.
     func applyLevel() {
+        // Behind windows, one step above the decorations (desktop icons + 1),
+        // so a garland or the candles never come up over the photos, even
+        // after being clicked.
         level = Placement.behindWindows
-            ? NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
+            ? NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 2)
             : .floating
     }
 

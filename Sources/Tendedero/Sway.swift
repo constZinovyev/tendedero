@@ -172,21 +172,32 @@ final class SwayView: NSView {
     private func report() {
         guard let host, let window, let content = window.contentView else { return }
         guard let r = cardRect else {
-            line.hitRects[id] = nil
+            forget()
             return
         }
         let inWindow = host.convert(r, to: nil)
-        line.hitRects[id] = CGRect(x: inWindow.minX, y: content.bounds.height - inWindow.maxY,
-                                   width: inWindow.width, height: inWindow.height)
+        let rect = CGRect(x: inWindow.minX, y: content.bounds.height - inWindow.maxY,
+                          width: inWindow.width, height: inWindow.height)
+        line.hitRects[id] = rect
+        reported = rect
     }
+
+    /// The last rect this view reported, so it only ever clears its own.
+    private var reported: CGRect?
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         report()
     }
 
+    /// Clears the card's rect, unless a newer view for the same photo has
+    /// already reported its own: when a photo comes to the front SwiftUI may
+    /// build its new view before taking the old one down, and wiping the new
+    /// rect would let the next click, like the second of a double click, go
+    /// through to the desktop.
     func forget() {
-        line.hitRects[id] = nil
+        if let reported, line.hitRects[id] == reported { line.hitRects[id] = nil }
+        reported = nil
     }
 
     // MARK: Swinging

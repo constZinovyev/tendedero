@@ -5,8 +5,8 @@ import SwiftUI
 /// A large look at one photo. The card on the line grows into it: it opens
 /// below the card, lined up with it, in the same glass frame, only bigger.
 /// It is only for looking: no editing, no other app. Drag it to move it, drag
-/// a corner to resize it. The cross, a click elsewhere, Escape or Space sends
-/// it back to the line.
+/// a corner to resize it. A click on it or elsewhere, the cross, Escape or
+/// Space sends it back to the line.
 @MainActor
 final class PhotoPreview {
     static let shared = PhotoPreview()
@@ -292,8 +292,10 @@ private struct PreviewStage: View {
                 .frame(width: r.width, height: r.height)
                 .rotationEffect(.degrees(model.tilt), anchor: .top)
                 // Gestures go before .position, which fills the whole screen:
-                // after it they would catch drags anywhere.
+                // after it they would catch drags anywhere. A click without
+                // moving closes the photo, like the cross; a drag moves it.
                 .gesture(move)
+                .onTapGesture { model.onClose() }
                 .position(x: r.midX, y: r.midY)
                 .opacity(model.opacity)
 
