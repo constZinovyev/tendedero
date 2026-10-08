@@ -98,10 +98,20 @@ final class CandleLayers {
         let style: CandleStyle
         let scale: CGFloat
         let candles: [(rect: CGRect, image: CGImage?)]
-        let flames: [(rect: CGRect, image: CGImage?)]
+        /// Warm light from each flame on its wax and saucer, which rises and
+        /// falls with the flicker.
+        let waxLights: [(rect: CGRect, image: CGImage?)]
+        let flame: FlamePictures
         let halo: (rect: CGRect, image: CGImage?)
     }
     private var pictures: Pictures?
+
+    /// The parts of each flame on screen, for a draft or a sputter to move.
+    private var parts: [(sway: CALayer, stretch: CALayer, halo: CALayer, light: CALayer)] = []
+    private var draftTimer: Timer?
+    private var flickerAmount: Double = 0
+
+    deinit { MainActor.assumeIsolated { draftTimer?.invalidate() } }
 
     /// `size` is the area to draw in: the cached candles are flattened to it.
     func render(_ set: CandleSet?, style: CandleStyle, origin: CGPoint, size: CGSize, scale: CGFloat) {
@@ -120,6 +130,9 @@ final class CandleLayers {
         still.frame = root.bounds
         var halos: [CALayer] = []
         var flames: [CALayer] = []
+        var lights: [CALayer] = []
+        parts = []
+        flickerAmount = Double(style.flicker)
 
         for (i, c) in style.layout.enumerated() {
             let foot = CGPoint(x: base.x + c.dx, y: base.y + c.dy)
@@ -135,8 +148,17 @@ final class CandleLayers {
             }
             halos.append(halo)
             still.addSublayer(Sprite.layer(pics.candles[i].image, rect: pics.candles[i].rect, at: foot, scale: scale))
-            flames.append(flame(pics.flames[i], at: CGPoint(x: foot.x, y: top + u * 0.02), style: style,
-                                seed: c.seed, flicker: flicker))
+            let light = Sprite.layer(pics.waxLights[i].image, rect: pics.waxLights[i].rect, at: foot, scale: scale)
+            if style.flicker > 0.01 {
+                light.add(flicker.animation("opacity", around: 0.6, by: 0.4 * Double(style.flicker)), forKey: "flicker")
+            }
+            lights.append(light)
+            let flameLayer = flame(pics.flame, at: CGPoint(x: foot.x, y: top + u * 0.02), style: style,
+                                   seed: c.seed, flicker: flicker)
+            flames.append(flameLayer)
+            if let stretch = flameLayer.sublayers?.first {
+                parts.append((flameLayer, stretch, halo, light))
+            }
         }
         // The candles never change once drawn: cache them as one bitmap.
         still.shouldRasterize = true
@@ -144,7 +166,9 @@ final class CandleLayers {
         // Halos go under the wax, flames over it.
         halos.forEach { root.addSublayer($0) }
         root.addSublayer(still)
+        lights.forEach { root.addSublayer($0) }
         flames.forEach { root.addSublayer($0) }
+        if style.flicker > 0.01 { scheduleDraft() }
     }
 
     // MARK: Pictures
@@ -160,8 +184,15 @@ final class CandleLayers {
                 Self.drawCandle(ctx, u: u, height: c.height, seed: c.seed, style: st)
             })
         }
+        let waxLights = st.layout.map { c -> (CGRect, CGImage?) in
+            let r = st.radius * 1.75
+            let rect = CGRect(x: -r, y: -u * 7 * c.height - u * 1.2, width: r * 2, height: u * 7 * c.height + u * 2.6)
+            return (rect, Sprite.draw(rect, scale: scale) { ctx in
+                Self.drawWaxLight(ctx, u: u, height: c.height, seed: c.seed, style: st)
+            })
+        }
         let fu = u * pow(st.thickness, 0.3)
-        let flames = st.layout.map { _ in Self.flamePicture(u: fu, style: st, scale: scale) }
+        let flame = Self.flamePictures(u: fu, style: st, scale: scale)
         let r = u * 7
         let haloRect = CGRect(x: -r, y: -r, width: r * 2, height: r * 2)
         let halo = Sprite.draw(haloRect, scale: scale) { ctx in
@@ -173,7 +204,8 @@ final class CandleLayers {
                 (1, hslColor(w - 6, 0.9, 0.5, 0)),
             ])
         }
-        let made = Pictures(style: st, scale: scale, candles: candles, flames: flames, halo: (haloRect, halo))
+        let made = Pictures(style: st, scale: scale, candles: candles, waxLights: waxLights, flame: flame,
+                            halo: (haloRect, halo))
         pictures = made
         return made
     }
@@ -224,16 +256,17 @@ final class CandleLayers {
     /// warm under the flame, an uneven melted rim, a crater with a pool of
     /// melted wax reflecting the flame, drips that start with a bulge at
     /// the rim and end in a drop, and the wick.
-    private static func drawCandle(_ ctx: CGContext, u: CGFloat, height k: CGFloat, seed: Int, style st: CandleStyle) {
+    /// A candle's outline and its uneven rim, the same for the candle and
+    /// for the light that plays on it. Uses the first numbers of `rnd`.
+    private static func outline(u: CGFloat, height k: CGFloat, style st: CandleStyle, rnd: inout SeededRandom)
+        -> (body: CGPath, rimPoint: (CGFloat) -> CGPoint) {
         let R = st.radius, ry = R * 0.3, h = u * 7 * k, top = -h, base: CGFloat = 0
-        var rnd = SeededRandom(seed: seed * 7 + 3)
-        let w = st.warmth
         let lipAmp = u * 0.12
         let ph0 = rnd.nextCG() * 6, ph1 = rnd.nextCG() * 6
         let lip: (CGFloat) -> CGFloat = { th in lipAmp * (0.6 + 0.4 * sin(th * 3 + ph0) + 0.25 * sin(th * 7 + ph1)) }
         let rimPoint: (CGFloat) -> CGPoint = { th in CGPoint(x: R * sin(th), y: top + ry * cos(th) - lip(th)) }
 
-        // The body's outline: the sides, the front of the bottom, the back of the rim.
+        // The sides, the front of the bottom, the back of the rim.
         let body = CGMutablePath()
         body.move(to: CGPoint(x: -R, y: top - lip(-.pi / 2)))
         body.addLine(to: CGPoint(x: -R, y: base))
@@ -242,6 +275,46 @@ final class CandleLayers {
         body.addLine(to: CGPoint(x: R, y: top - lip(.pi / 2)))
         for i in 0...40 { body.addLine(to: rimPoint(.pi / 2 + .pi * CGFloat(i) / 40)) }
         body.closeSubpath()
+        return (body, rimPoint)
+    }
+
+    /// The flame's own light on its candle and saucer, y down from where the
+    /// candle stands: brightest on the rim and the melted pool, fading down
+    /// the wax, with a little on the saucer. Layered over the candle and
+    /// faded with the flicker, so the wax seems lit by a living flame.
+    private static func drawWaxLight(_ ctx: CGContext, u: CGFloat, height k: CGFloat, seed: Int, style st: CandleStyle) {
+        let R = st.radius, h = u * 7 * k, top = -h, w = st.warmth
+        var rnd = SeededRandom(seed: seed * 7 + 3)
+        let shape = outline(u: u, height: k, style: st, rnd: &rnd)
+        let rim = CGMutablePath()
+        for i in 0...60 {
+            let p = shape.rimPoint(.pi * 2 * CGFloat(i) / 60)
+            if i == 0 { rim.move(to: p) } else { rim.addLine(to: p) }
+        }
+        rim.closeSubpath()
+        let lit = CGMutablePath()
+        lit.addPath(shape.body)
+        lit.addPath(rim)
+        Sprite.clipped(ctx, lit) {
+            Sprite.radial(ctx, from: CGPoint(x: 0, y: top - u * 0.6), r0: 0, to: CGPoint(x: 0, y: top),
+                          r1: max(R * 2.2, h * 0.5), [
+                (0, hslColor(w + 8, 1, 0.74, 0.5)), (0.5, hslColor(w + 4, 0.95, 0.66, 0.16)), (1, hslColor(w, 0.9, 0.6, 0)),
+            ])
+        }
+        let plateR = st.radius * 1.55
+        Sprite.clipped(ctx, Sprite.ellipse(0, u * 0.25, plateR, plateR * 0.32)) {
+            Sprite.radial(ctx, center: CGPoint(x: 0, y: u * 0.1), radius: plateR * 1.1, [
+                (0, hslColor(w + 6, 1, 0.7, 0.22)), (1, hslColor(w, 0.9, 0.6, 0)),
+            ])
+        }
+    }
+
+    private static func drawCandle(_ ctx: CGContext, u: CGFloat, height k: CGFloat, seed: Int, style st: CandleStyle) {
+        let R = st.radius, ry = R * 0.3, h = u * 7 * k, top = -h, base: CGFloat = 0
+        var rnd = SeededRandom(seed: seed * 7 + 3)
+        let w = st.warmth
+        let shape = outline(u: u, height: k, style: st, rnd: &rnd)
+        let body = shape.body, rimPoint = shape.rimPoint
 
         Sprite.clipped(ctx, body) {
             Sprite.linear(ctx, from: CGPoint(x: -R, y: 0), to: CGPoint(x: R, y: 0), [
@@ -341,49 +414,90 @@ final class CandleLayers {
         Sprite.fill(ctx, Sprite.ellipse(0, tip.y - u * 0.15, max(0.6, u * 0.04), max(0.6, u * 0.04)), hslColor(w - 16, 1, 0.55, 0.95))
     }
 
-    /// The flame standing on (0, 0), y down: a soft orange glow, the flame
-    /// itself, a white core and a little blue at the base, each softened
-    /// with a blur once, when the picture is made.
-    private static func flamePicture(u: CGFloat, style st: CandleStyle, scale: CGFloat) -> (rect: CGRect, image: CGImage?) {
+    /// The flame standing on (0, 0), y down, as a loop of frames: its tip
+    /// bends and flutters, it grows taller and thinner and shrinks back, its
+    /// waist narrows. Each frame is the flame itself, a white core and a
+    /// little blue at the base, softened with a blur once, when it is made.
+    /// The soft orange glow around it is a picture of its own, so its
+    /// strength can change: redder as the flame dips, whiter as it flares.
+    struct FlamePictures {
+        let rect: CGRect
+        let frames: [CGImage]
+        let glow: CGImage?
+    }
+
+    static let flameFrames = 24
+
+    private static func flamePictures(u: CGFloat, style st: CandleStyle, scale: CGFloat) -> FlamePictures {
         let w = st.warmth
-        let h = u * 1.7, fw = u * 0.36
+        let h = u * 1.95, fw = u * 0.31
         let pad = u * 0.9
-        let rect = CGRect(x: -fw * 1.6 - pad, y: -h * 1.1 - pad, width: (fw * 1.6 + pad) * 2, height: h * 1.1 + u * 0.4 + pad * 2)
-        func shape(_ ww: CGFloat, _ hh: CGFloat, dy: CGFloat = 0) -> CGPath {
+        let rect = CGRect(x: -fw * 2.4 - pad, y: -h * 1.2 - pad, width: (fw * 2.4 + pad) * 2, height: h * 1.2 + u * 0.4 + pad * 2)
+        /// A flame of half width `ww` and height `hh`, its tip moved `tip`
+        /// sideways, `waist` how far in its upper sides come.
+        /// Round at the bottom, widest a third of the way up, then drawn
+        /// out into a fine point, as a candle flame is.
+        func shape(_ ww: CGFloat, _ hh: CGFloat, tip: CGFloat, waist: CGFloat, dy: CGFloat = 0) -> CGPath {
             let p = CGMutablePath()
             p.move(to: CGPoint(x: 0, y: dy + ww * 0.25))
-            p.addCurve(to: CGPoint(x: 0, y: dy - hh), control1: CGPoint(x: -ww * 1.1, y: dy - hh * 0.02), control2: CGPoint(x: -ww * 0.85, y: dy - hh * 0.58))
-            p.addCurve(to: CGPoint(x: 0, y: dy + ww * 0.25), control1: CGPoint(x: ww * 0.85, y: dy - hh * 0.58), control2: CGPoint(x: ww * 1.1, y: dy - hh * 0.02))
+            p.addCurve(to: CGPoint(x: -ww * 0.95, y: dy - hh * 0.34),
+                       control1: CGPoint(x: -ww * 0.5, y: dy + ww * 0.2), control2: CGPoint(x: -ww * 1.0, y: dy - hh * 0.12))
+            p.addCurve(to: CGPoint(x: tip, y: dy - hh),
+                       control1: CGPoint(x: -ww * 0.85 * waist + tip * 0.45, y: dy - hh * 0.55),
+                       control2: CGPoint(x: tip - ww * 0.1, y: dy - hh * 0.84))
+            p.addCurve(to: CGPoint(x: ww * 0.95, y: dy - hh * 0.34),
+                       control1: CGPoint(x: tip + ww * 0.1, y: dy - hh * 0.84),
+                       control2: CGPoint(x: ww * 0.85 * waist + tip * 0.45, y: dy - hh * 0.55))
+            p.addCurve(to: CGPoint(x: 0, y: dy + ww * 0.25),
+                       control1: CGPoint(x: ww * 1.0, y: dy - hh * 0.12), control2: CGPoint(x: ww * 0.5, y: dy + ww * 0.2))
             p.closeSubpath()
             return p
         }
-        func layer(_ blur: CGFloat, _ body: @escaping (CGContext) -> Void) -> CGImage? {
+        func soft(_ blur: CGFloat, _ body: @escaping (CGContext) -> Void) -> CGImage? {
             guard let image = Sprite.draw(rect, scale: scale, body) else { return nil }
             return Sprite.blurred(image, radius: blur * scale)
         }
-        let glow = layer(max(0.6, u * 0.22)) { ctx in
-            Sprite.fill(ctx, shape(fw * 1.35, h * 1.08), hslColor(w - 6, 1, 0.55, 0.35))
-        }
-        let main = layer(max(0.3, u * 0.05)) { ctx in
-            Sprite.clipped(ctx, shape(fw, h)) {
-                Sprite.linear(ctx, from: CGPoint(x: 0, y: 0), to: CGPoint(x: 0, y: -h), [
-                    (0, hslColor(w + 10, 1, 0.8, 0.95)), (0.35, hslColor(w + 6, 1, 0.66, 0.95)),
-                    (0.8, hslColor(w - 6, 1, 0.55, 0.8)), (1, hslColor(w - 14, 1, 0.5, 0.2)),
-                ])
-            }
-        }
-        let core = layer(max(0.3, u * 0.07)) { ctx in
-            Sprite.clipped(ctx, shape(fw * 0.55, h * 0.62, dy: -u * 0.05)) {
-                Sprite.linear(ctx, from: CGPoint(x: 0, y: 0), to: CGPoint(x: 0, y: -h * 0.62), [
-                    (0, Sprite.rgba(255, 255, 252, 1)), (1, Sprite.rgba(255, 248, 220, 0.55)),
-                ])
-            }
-        }
-        let blue = layer(max(0.3, u * 0.06)) { ctx in
-            Sprite.fill(ctx, Sprite.ellipse(0, u * 0.02, fw * 0.55, u * 0.14), Sprite.rgba(80, 130, 255, 0.5))
-        }
         let size = CGSize(width: (rect.width * scale).rounded(.up), height: (rect.height * scale).rounded(.up))
-        return (rect, Sprite.stack([glow, main, core, blue], size: size))
+        // Just a faint blue rim at the very bottom, where the flame meets the air.
+        let blue = soft(max(0.3, u * 0.05)) { ctx in
+            Sprite.fill(ctx, Sprite.ellipse(0, -u * 0.02, fw * 0.5, u * 0.09), Sprite.rgba(110, 150, 255, 0.28))
+        }
+        // Whole cycles of a slow lean, a quicker sway and a fast flutter at
+        // the tip, so the loop has no seam.
+        let frames: [CGImage] = (0..<flameFrames).compactMap { k in
+            let t = 2 * CGFloat.pi * CGFloat(k) / CGFloat(flameFrames)
+            let bend = 0.22 * sin(t + 0.7) + 0.14 * sin(3 * t + 2.1) + 0.1 * sin(7 * t + 4)
+            let tip = bend * fw * 2.2
+            let tall = 1 + 0.09 * sin(2 * t + 1.3) + 0.05 * sin(5 * t + 0.4)
+            let wide = 1 - 0.07 * sin(2 * t + 1.3) + 0.04 * sin(4 * t + 2.8)
+            let waist = 0.85 + 0.08 * sin(3 * t + 5.1)
+            let main = soft(max(0.3, u * 0.05)) { ctx in
+                Sprite.clipped(ctx, shape(fw * wide, h * tall, tip: tip, waist: waist)) {
+                    // Dim and see-through by the wick, bright yellow in the
+                    // middle, deepening to orange and fading at the point.
+                    Sprite.linear(ctx, from: CGPoint(x: 0, y: 0), to: CGPoint(x: tip, y: -h * tall), [
+                        (0, hslColor(w - 4, 0.9, 0.55, 0.45)), (0.16, hslColor(w + 8, 1, 0.72, 0.9)),
+                        (0.4, hslColor(w + 6, 1, 0.68, 0.97)), (0.78, hslColor(w - 6, 1, 0.56, 0.85)),
+                        (1, hslColor(w - 14, 1, 0.5, 0.15)),
+                    ])
+                }
+            }
+            let core = soft(max(0.3, u * 0.07)) { ctx in
+                // The white-hot core sits a little above the wick.
+                let lift = u * 0.2
+                Sprite.clipped(ctx, shape(fw * 0.42 * wide, h * 0.6 * tall, tip: tip * 0.5, waist: waist, dy: -lift)) {
+                    Sprite.linear(ctx, from: CGPoint(x: 0, y: -lift), to: CGPoint(x: tip * 0.5, y: -lift - h * 0.6 * tall), [
+                        (0, Sprite.rgba(255, 252, 235, 0.55)), (0.3, Sprite.rgba(255, 255, 250, 1)),
+                        (1, Sprite.rgba(255, 246, 215, 0.5)),
+                    ])
+                }
+            }
+            return Sprite.stack([main, core, blue], size: size)
+        }
+        let glow = soft(max(0.6, u * 0.22)) { ctx in
+            Sprite.fill(ctx, shape(fw * 1.3, h * 1.05, tip: 0, waist: 0.85), hslColor(w - 10, 1, 0.52, 0.32))
+        }
+        return FlamePictures(rect: rect, frames: frames, glow: glow)
     }
 
     // MARK: Motion
@@ -391,22 +505,107 @@ final class CandleLayers {
     /// The flame sways from its base on a slow loop of its own, and on the
     /// candle's flicker it stretches taller and burns brighter, together,
     /// as a real flame does; its halo follows the same flicker.
-    private func flame(_ pic: (rect: CGRect, image: CGImage?), at tip: CGPoint, style st: CandleStyle,
+    private func flame(_ pic: FlamePictures, at tip: CGPoint, style st: CandleStyle,
                        seed: Int, flicker: Flicker) -> CALayer {
+        let rect = pic.rect
         let sway = CALayer()
-        sway.bounds = CGRect(origin: .zero, size: pic.rect.size)
-        sway.anchorPoint = CGPoint(x: -pic.rect.minX / pic.rect.width, y: pic.rect.maxY / pic.rect.height)
+        sway.bounds = CGRect(origin: .zero, size: rect.size)
+        sway.anchorPoint = CGPoint(x: -rect.minX / rect.width, y: rect.maxY / rect.height)
         sway.position = tip
-        let stretch = Sprite.layer(pic.image, rect: pic.rect, at: CGPoint(x: -pic.rect.minX, y: pic.rect.maxY), scale: scale)
+        let stretch = CALayer()
+        stretch.bounds = sway.bounds
+        stretch.anchorPoint = sway.anchorPoint
+        stretch.position = CGPoint(x: -rect.minX, y: rect.maxY)
         sway.addSublayer(stretch)
+        let glow = Sprite.layer(pic.glow, rect: rect, at: CGPoint(x: -rect.minX, y: rect.maxY), scale: scale)
+        let body = Sprite.layer(pic.frames.first, rect: rect, at: CGPoint(x: -rect.minX, y: rect.maxY), scale: scale)
+        stretch.addSublayer(glow)
+        stretch.addSublayer(body)
 
         let f = Double(st.flicker)
         guard f > 0.01 else { return sway }
         var r = SeededRandom(seed: seed * 13 + 5)
-        sway.add(loop("transform.rotation.z", around: 0, by: 0.1 * f, duration: 2.3 + Double(seed) * 0.37, random: &r), forKey: "sway")
-        stretch.add(flicker.animation("transform.scale.y", around: 1, by: 0.12 * f), forKey: "stretch")
-        stretch.add(flicker.animation("opacity", around: 0.92, by: 0.08 * f), forKey: "glow")
+        // The shape: frames played in a loop, each candle at its own pace
+        // and from its own frame.
+        let shape = CAKeyframeAnimation(keyPath: "contents")
+        shape.values = pic.frames
+        shape.calculationMode = .discrete
+        shape.duration = Double(pic.frames.count) / 12 * (0.9 + 0.12 * Double(seed))
+        shape.repeatCount = .infinity
+        shape.isRemovedOnCompletion = false
+        shape.beginTime = CACurrentMediaTime() - r.next() * shape.duration
+        shape.calm()
+        body.add(shape, forKey: "shape")
+        sway.add(loop("transform.rotation.z", around: 0, by: 0.08 * f, duration: 2.3 + Double(seed) * 0.37, random: &r), forKey: "sway")
+        stretch.add(flicker.animation("transform.scale.y", around: 1, by: 0.08 * f), forKey: "stretch")
+        body.add(flicker.animation("opacity", around: 0.92, by: 0.08 * f), forKey: "bright")
+        // Redder glow as the flame dips, less as it flares.
+        glow.add(flicker.animation("opacity", around: 0.75, by: -0.25 * f), forKey: "ember")
         return sway
+    }
+
+    // MARK: Drafts
+
+    /// Every so often a draft: all flames lean the same way and dip, one
+    /// after another, then straighten. Now and then just one flame
+    /// sputters, almost going out, and recovers. A single timer, firing
+    /// every 20 to 60 seconds.
+    private func scheduleDraft() {
+        guard draftTimer == nil else { return }
+        let timer = Timer(timeInterval: .random(in: 20...60), repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.draftTimer = nil
+                self.draft()
+                if self.flickerAmount > 0.01 { self.scheduleDraft() }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        draftTimer = timer
+    }
+
+    private func draft() {
+        // Nothing to see while the window is paused or hidden.
+        guard !parts.isEmpty, root.superlayer?.speed != 0 else { return }
+        let f = flickerAmount
+        if Double.random(in: 0...1) < 0.7 {
+            let side: Double = Bool.random() ? 1 : -1
+            let times: [NSNumber] = [0, 0.18, 0.35, 0.5, 0.7, 0.85, 1]
+            for (i, p) in parts.enumerated() {
+                let delay = Double(i) * 0.07
+                p.sway.add(additive("transform.rotation.z", [0, 0.22, 0.12, 0.17, 0.05, -0.03, 0].map { $0 * side * f },
+                                    times, 1.8, delay), forKey: "draft")
+                p.stretch.add(additive("transform.scale.y", [0, -0.15, -0.06, -0.1, -0.02, 0.02, 0].map { $0 * f },
+                                       times, 1.8, delay), forKey: "draft")
+                let dim = [0, -0.14, -0.06, -0.1, -0.02, 0.02, 0].map { $0 * f }
+                p.halo.add(additive("opacity", dim, times, 1.8, delay), forKey: "draft")
+                p.light.add(additive("opacity", dim, times, 1.8, delay), forKey: "draft")
+            }
+        } else if let p = parts.randomElement() {
+            let times: [NSNumber] = [0, 0.15, 0.35, 0.55, 0.8, 1]
+            p.stretch.add(additive("transform.scale.y", [0, -0.5, -0.35, -0.55, -0.1, 0].map { $0 * f },
+                                   times, 0.9, 0), forKey: "draft")
+            p.stretch.add(additive("opacity", [0, -0.35, -0.25, -0.4, -0.05, 0].map { $0 * f },
+                                   times, 0.9, 0), forKey: "sputter")
+            let dim = [0, -0.3, -0.2, -0.35, -0.05, 0].map { $0 * f }
+            p.halo.add(additive("opacity", dim, times, 0.9, 0), forKey: "draft")
+            p.light.add(additive("opacity", dim, times, 0.9, 0), forKey: "draft")
+        }
+    }
+
+    private func additive(_ keyPath: String, _ values: [Double], _ times: [NSNumber],
+                          _ duration: Double, _ delay: Double) -> CAKeyframeAnimation {
+        let a = CAKeyframeAnimation(keyPath: keyPath)
+        a.values = values
+        a.keyTimes = times
+        a.calculationMode = .cubic
+        a.duration = duration
+        a.isAdditive = true
+        a.beginTime = CACurrentMediaTime() + delay
+        if #available(macOS 12.0, *) {
+            a.preferredFrameRateRange = CAFrameRateRange(minimum: 24, maximum: 30, preferred: 30)
+        }
+        return a
     }
 
     /// A repeating, uneven wobble: a dozen random values around a centre,
