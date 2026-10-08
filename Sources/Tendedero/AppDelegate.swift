@@ -85,8 +85,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         line.$items
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                self?.itemsChanged()
-                self?.lockScreen.scheduleExport()
+                guard let self else { return }
+                self.itemsChanged()
+                self.lockScreen.scheduleExport()
+                Backup.schedule(self.line)
             }
             .store(in: &cancellables)
 
@@ -541,11 +543,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         always.keyEquivalentModifierMask = [.control, .option, .command]
         menu.addItem(always)
 
-        let clearItem = ClosureMenuItem(L("Take everything down", "Descolgar todo")) { [weak self] in
-            self?.line.clear()
+        let clearItem = ClosureMenuItem(L("Take everything down…", "Descolgar todo…")) { [weak self] in
+            self?.confirmClear()
         }
         clearItem.isEnabled = line.liveCount > 0
         menu.addItem(clearItem)
+
+        let restore = NSMenuItem(title: L("Restore from backup", "Restaurar copia"), action: nil, keyEquivalent: "")
+        let days = Backup.days()
+        if !days.isEmpty {
+            let submenu = NSMenu()
+            for day in days {
+                submenu.addItem(ClosureMenuItem("\(Self.dayTitle(day.date)) — \(Self.photoCount(day.count))") { [weak self] in
+                    guard let self else { return }
+                    Backup.restore(day, into: self.line)
+                })
+            }
+            restore.submenu = submenu
+        }
+        restore.isEnabled = !days.isEmpty
+        menu.addItem(restore)
 
         let inbox = ClosureMenuItem(L("Handle screenshots", "Encargarse de las capturas")) { [weak self] in
             self?.setInbox(!Inbox.isEnabled)
@@ -614,6 +631,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(ClosureMenuItem(L("Quit Tendedero", "Salir de Tendedero"), key: "q") {
             NSApp.terminate(nil)
         })
+    }
+
+    /// Asks first: one click in the menu should not empty the whole line.
+    private func confirmClear() {
+        let alert = NSAlert()
+        alert.messageText = L("Take everything down?", "¿Descolgar todo?")
+        alert.informativeText = L(
+            "All \(Self.photoCount(line.liveCount)) come off the line. The files stay where they are, and today's backup keeps what was hanging.",
+            "Se descuelgan \(Self.photoCount(line.liveCount)). Los archivos se quedan donde están, y la copia de hoy guarda lo que estaba colgado.")
+        alert.alertStyle = .warning
+        let takeDown = alert.addButton(withTitle: L("Take down", "Descolgar"))
+        takeDown.hasDestructiveAction = true
+        alert.addButton(withTitle: L("Cancel", "Cancelar"))
+        if let icon = NSImage(named: "Tendedero") ?? NSApp.applicationIconImage { alert.icon = icon }
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn { line.clear() }
+    }
+
+    private static func photoCount(_ n: Int) -> String {
+        n == 1 ? L("1 photo", "1 foto") : L("\(n) photos", "\(n) fotos")
+    }
+
+    private static func dayTitle(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .none
+        f.doesRelativeDateFormatting = true
+        return f.string(from: date)
     }
 
     /// Puts the line on the right screen after a placement change.
