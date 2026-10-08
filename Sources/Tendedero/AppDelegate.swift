@@ -582,6 +582,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sound.state = line.soundOn ? .on : .off
         menu.addItem(sound)
 
+        let breeze = ClosureMenuItem(L("Breeze", "Brisa")) { [weak self] in
+            guard let self else { return }
+            self.line.breezeOn.toggle()
+        }
+        breeze.state = line.breezeOn ? .on : .off
+        breeze.toolTip = L("Now and then the photos sway a little. Off saves energy.",
+                           "De vez en cuando las fotos se mecen. Apagarla ahorra energía.")
+        menu.addItem(breeze)
+
         let mainOnly = ClosureMenuItem(L("Main screen only", "Solo en la pantalla principal")) { [weak self] in
             Placement.mainScreenOnly.toggle()
             self?.moveLine()

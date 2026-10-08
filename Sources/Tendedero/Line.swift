@@ -48,6 +48,13 @@ final class Line: ObservableObject {
     /// The line's width in points, kept up to date by the panel.
     var width: CGFloat = 1440
 
+    /// The occasional breeze that sways the photos. Each sway is drawn by
+    /// SwiftUI frame by frame, so it can be turned off to save energy.
+    var breezeOn: Bool {
+        get { !UserDefaults.standard.bool(forKey: "breezeOff") }
+        set { UserDefaults.standard.set(!newValue, forKey: "breezeOff") }
+    }
+
     var soundOn: Bool {
         get { !UserDefaults.standard.bool(forKey: "soundOff") }
         set { UserDefaults.standard.set(!newValue, forKey: "soundOff") }
@@ -287,9 +294,11 @@ final class Line: ObservableObject {
     /// Every so often a little wind moves the line. It is the detail that
     /// makes it feel like an object and not a widget.
     private func scheduleGust() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + .random(in: 7...16)) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + .random(in: 15...35)) { [weak self] in
             guard let self else { return }
-            if !self.items.isEmpty && self.draggingID == nil && self.slidingID == nil { self.gust += 1 }
+            // Only while the line is in view: a breeze nobody sees would
+            // still keep SwiftUI redrawing the swinging cards.
+            if self.breezeOn && self.revealed && !self.items.isEmpty && self.draggingID == nil && self.slidingID == nil { self.gust += 1 }
             self.scheduleGust()
         }
     }

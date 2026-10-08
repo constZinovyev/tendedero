@@ -8,6 +8,7 @@ import Combine
 final class GarlandController {
     let store = Garlands()
     private var overlays: [GarlandOverlay] = []
+    private var refreshPending = false
     private var cancellables = Set<AnyCancellable>()
 
     init() {
@@ -31,9 +32,13 @@ final class GarlandController {
 
     /// Garlands hang on the screens the line may come down on.
     func refresh() {
-        // objectWillChange fires before the change lands; draw after it.
+        // objectWillChange fires before the change lands; draw after it, and
+        // only once however many changes came in meanwhile (a drag sends many).
+        guard !refreshPending else { return }
+        refreshPending = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.refreshPending = false
             let show = self.store.visible || self.store.editing
             for overlay in self.overlays {
                 if show && Placement.allows(overlay.home) && (!self.store.isEmpty || self.store.editing) {
@@ -129,7 +134,10 @@ final class GarlandController {
             }
             menu.addItem(item)
         }
-        slider(L("Size", "Tamaño"), Double(style.size), 4...24, format: { "\(Int($0.rounded())) pt" }) { $0.size = CGFloat($1) }
+        slider(L("Size", "Tamaño"), Double(style.size), 6...30, format: { "\(Int($0.rounded())) pt" }) { $0.size = CGFloat($1) }
+        slider(L("Thickness", "Grosor"), Double(style.thickness) * 100, 70...140, format: { "\(Int($0.rounded()))%" }) { $0.thickness = CGFloat($1 / 100) }
+        slider(L("Closeness", "Cercanía"), Double(style.tightness) * 100, 60...120, format: { "\(Int($0.rounded()))%" }) { $0.tightness = CGFloat($1 / 100) }
+        slider(L("Drips", "Chorreones"), Double(style.drips), 0...6, format: { "\(Int($0.rounded()))" }) { $0.drips = Int($1.rounded()) }
         slider(L("Halo", "Halo"), Double(style.halo) * 100, 0...150, format: { "\(Int($0.rounded()))%" }) { $0.halo = CGFloat($1 / 100) }
         slider(L("Flicker", "Parpadeo"), Double(style.flicker) * 100, 0...150, format: { "\(Int($0.rounded()))%" }) { $0.flicker = CGFloat($1 / 100) }
         slider(L("Warmth", "Calidez"), Double(style.warmth), 18...48, format: { "\(Int($0.rounded()))°" }) { $0.warmth = CGFloat($1) }
@@ -220,6 +228,15 @@ final class GarlandOverlay: NSPanel {
         isReleasedWhenClosed = false
         contentView = view
         setFrame(screen.frame, display: false)
+        // When windows cover the desktop completely, nothing here can be
+        // seen: stop the animations until it shows again.
+        NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,
+                                               object: self, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.view.setPaused(!self.occlusionState.contains(.visible))
+            }
+        }
     }
 
     override var canBecomeKey: Bool { store.editing }
@@ -303,6 +320,22 @@ final class GarlandEditView: NSView {
 
     @objc private func done() { store.editing = false }
 
+    /// Freezes or resumes every animation in this window.
+    func setPaused(_ paused: Bool) {
+        guard let layer, (layer.speed == 0) != paused else { return }
+        if paused {
+            let t = layer.convertTime(CACurrentMediaTime(), from: nil)
+            layer.speed = 0
+            layer.timeOffset = t
+        } else {
+            let t = layer.timeOffset
+            layer.speed = 1
+            layer.timeOffset = 0
+            layer.beginTime = 0
+            layer.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil) - t
+        }
+    }
+
     func reload() {
         let scale = window?.backingScaleFactor ?? 2
         layers.render(store.items, style: store.style, origin: screenFrame.origin, scale: scale)
@@ -367,6 +400,7 @@ final class GarlandEditView: NSView {
         downPoint = global(event)
         moved = false
         target = hit(downPoint)
+        if case .candles = target { store.holdSaves = true }
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -405,6 +439,10 @@ final class GarlandEditView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         guard store.editing else { return }
+        if store.holdSaves {
+            store.holdSaves = false
+            store.saveCandles()
+        }
         if !moved, case .bulb(let id, let i) = target {
             store.toggleBulb(i, of: id)
         } else if moved {

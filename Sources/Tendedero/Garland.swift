@@ -193,8 +193,11 @@ final class Garlands: ObservableObject {
     }
     /// The three candles, if they are out.
     @Published var candles: CandleSet? {
-        didSet { saveCandles() }
+        didSet { if !holdSaves { saveCandles() } }
     }
+    /// While something is being dragged, its moves are not written to disk
+    /// one by one; it is saved once when it is let go.
+    var holdSaves = false
     @Published var candleStyle = CandleStyle.defaults {
         didSet { saveCandles() }
     }
@@ -233,7 +236,7 @@ final class Garlands: ObservableObject {
         }
     }
 
-    private func saveCandles() {
+    func saveCandles() {
         let defaults = UserDefaults.standard
         if let candles, let data = try? JSONEncoder().encode(candles) {
             defaults.set(data, forKey: candlesKey)

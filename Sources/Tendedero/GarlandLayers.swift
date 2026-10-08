@@ -100,6 +100,9 @@ final class GarlandLayers {
 
     private func layer(for g: Garland, origin: CGPoint, style: GarlandStyle, now: CFTimeInterval) -> CALayer {
         let container = CALayer()
+        let fixed = CALayer()
+        let light = CALayer()
+        let bulbs = bulbSprites(style)
         let geo = GarlandGeometry(g)
         let local = geo.points.map { CGPoint(x: $0.x - origin.x, y: $0.y - origin.y) }
         let ink = NSColor(white: 0.045, alpha: 1).cgColor
@@ -115,8 +118,8 @@ final class GarlandLayers {
                 let q = CGPoint(x: p.x + n.dx * o, y: p.y + n.dy * o)
                 if i == 0 { path.move(to: q) } else { path.addLine(to: q) }
             }
-            container.addSublayer(stroke(path, color: ink, width: style.wireWidth, cap: .round))
-            container.addSublayer(stroke(path, color: NSColor(white: 1, alpha: 0.14).cgColor,
+            fixed.addSublayer(stroke(path, color: ink, width: style.wireWidth, cap: .round))
+            fixed.addSublayer(stroke(path, color: NSColor(white: 1, alpha: 0.14).cgColor,
                                          width: max(0.3, style.wireWidth * 0.3)))
         }
 
@@ -127,196 +130,153 @@ final class GarlandLayers {
                 let path = CGMutablePath()
                 path.move(to: p)
                 path.addLine(to: CGPoint(x: p.x, y: p.y - style.lead))
-                container.addSublayer(stroke(path, color: ink, width: max(0.6, style.wireWidth * 0.6)))
+                fixed.addSublayer(stroke(path, color: ink, width: max(0.6, style.wireWidth * 0.6)))
             }
             let attach = CGPoint(x: p.x, y: p.y - style.lead)
-            let bulb: (base: CALayer, lit: CALayer)
-            switch style.design {
-            case .glass: bulb = glassBulb(at: attach, style: style)
-            case .cartoon: bulb = cartoonBulb(at: attach, style: style)
-            }
-            container.addSublayer(bulb.base)
-            bulb.lit.opacity = Float(g.brightness)
+            fixed.addSublayer(Sprite.layer(bulbs.off, rect: bulbs.rect, at: attach, scale: scale))
+            let lit = Sprite.layer(bulbs.on, rect: bulbs.rect, at: attach, scale: scale)
+            lit.opacity = Float(g.brightness)
             if g.bulbsOff.contains(i) || g.mode == .off {
-                bulb.lit.opacity = 0
+                continue
             } else if let animation = animation(for: g, bulb: i, now: now) {
-                bulb.lit.add(animation, forKey: "light")
+                lit.add(animation, forKey: "light")
             }
+            light.addSublayer(lit)
         }
+        // Everything that never changes is cached as one bitmap; only the
+        // lit bulbs above it are composited when they fade.
+        fixed.shouldRasterize = true
+        fixed.rasterizationScale = scale
+        container.addSublayer(fixed)
+        container.addSublayer(light)
         return container
     }
 
-    // MARK: Designs
+    // MARK: Bulb sprites
+
+    /// The two pictures of a bulb for the current style: dark and lit. They
+    /// are drawn once and shared by every bulb of every garland; a bulb is
+    /// then just two image layers, and its light is the lit one's opacity.
+    private struct BulbSprites {
+        let style: GarlandStyle
+        let scale: CGFloat
+        /// The sprite's rect around the point the bulb hangs from, y down.
+        let rect: CGRect
+        let off: CGImage?
+        let on: CGImage?
+    }
+    private var sprites: BulbSprites?
+
+    private func bulbSprites(_ st: GarlandStyle) -> BulbSprites {
+        if let sprites, sprites.style == st, sprites.scale == scale { return sprites }
+        let s = st.bulbSize
+        let center = st.lightDrop - st.lead
+        let r = max(s * st.haloSize + 6, s * 1.6)
+        let rect = CGRect(x: -r, y: min(0, center - r) - 2, width: r * 2, height: max(center + r, s * 3) + 2 - min(0, center - r) + 2)
+        let draw: (CGContext, CGFloat) -> Void = { ctx, a in
+            switch st.design {
+            case .glass: Self.drawGlass(ctx, s: s, a: a, style: st)
+            case .cartoon: Self.drawCartoon(ctx, s: s, a: a, style: st)
+            }
+        }
+        let made = BulbSprites(style: st, scale: scale, rect: rect,
+                               off: Sprite.draw(rect, scale: scale) { draw($0, 0) },
+                               on: Sprite.draw(rect, scale: scale) { draw($0, 1) })
+        sprites = made
+        return made
+    }
+
+    /// The halo, as on the design page: a soft warm glow around the light.
+    private static func drawHalo(_ ctx: CGContext, x: CGFloat, y: CGFloat, r: CGFloat, k: CGFloat, warmth w: CGFloat) {
+        guard k > 0.005, r > 0 else { return }
+        let m: CGFloat = 0.85
+        Sprite.radial(ctx, center: CGPoint(x: x, y: y), radius: r, [
+            (0, hslColor(w, 0.95, 0.66, 0.5 * k * m)),
+            (0.22, hslColor(w, 0.95, 0.6, 0.22 * k * m)),
+            (0.55, hslColor(w, 0.9, 0.55, 0.06 * k * m)),
+            (1, hslColor(w, 0.9, 0.5, 0)),
+        ])
+    }
+
+    /// The glass outline: narrow at the cap, round below. y down.
+    private static func dropPath(x: CGFloat, y: CGFloat, s: CGFloat) -> CGPath {
+        let w = s * 0.62, h = s * 1.05
+        let p = CGMutablePath()
+        p.move(to: CGPoint(x: x - w * 0.45, y: y - h))
+        p.addCurve(to: CGPoint(x: x - w, y: y + h * 0.2), control1: CGPoint(x: x - w * 0.5, y: y - h * 0.5), control2: CGPoint(x: x - w, y: y - h * 0.3))
+        p.addCurve(to: CGPoint(x: x + w, y: y + h * 0.2), control1: CGPoint(x: x - w, y: y + h * 0.95), control2: CGPoint(x: x + w, y: y + h * 0.95))
+        p.addCurve(to: CGPoint(x: x + w * 0.45, y: y - h), control1: CGPoint(x: x + w, y: y - h * 0.3), control2: CGPoint(x: x + w * 0.5, y: y - h * 0.5))
+        p.closeSubpath()
+        return p
+    }
 
     /// Variant 2 of the design page: clear glass on a black cap, a filament
-    /// on two supports, a highlight streak, and a halo around it. The glass,
-    /// the dark filament and the highlight are always there; everything that
-    /// glows sits in `lit`, whose opacity is the light.
-    private func glassBulb(at p: CGPoint, style st: GarlandStyle) -> (base: CALayer, lit: CALayer) {
-        let s = st.bulbSize
-        let base = CALayer()
-        let lit = CALayer()
-        let gy = p.y - st.capHeight - s * 1.05        // the glass's reference point
-        let center = CGPoint(x: p.x, y: gy - s * 0.12) // the filament
-        let glassPath = Self.dropPath(x: p.x, y: gy, s: s)
-        let milk = 1 - min(max(st.glassClarity, 0), 1)
+    /// on two supports, a highlight streak, and a halo. `a` is the light,
+    /// 0 or 1. Drawn hanging from (0, 0), y down.
+    private static func drawGlass(_ ctx: CGContext, s: CGFloat, a: CGFloat, style st: GarlandStyle) {
+        let x: CGFloat = 0, w = st.warmth
+        let capW = s * 0.42, capH = st.capHeight
+        let gy = capH + s * 1.05, cy = gy + s * 0.12
+        let gl = 1 - min(max(st.glassClarity, 0), 1)
+        let glass = dropPath(x: x, y: gy, s: s)
 
-        // Halo first, so it sits under the glass.
-        if let halo = halo(at: center, style: st) { lit.addSublayer(halo) }
+        if a > 0 { drawHalo(ctx, x: x, y: cy, r: s * st.haloSize + 6, k: st.haloStrength * a, warmth: w) }
 
-        // Glass: a faint tint you can see through.
-        let glass = CAShapeLayer()
-        glass.path = glassPath
-        glass.fillColor = NSColor(white: 1, alpha: 0.12 + 0.4 * milk).cgColor
-        glass.strokeColor = NSColor(white: 0.25, alpha: 0.35).cgColor
-        glass.lineWidth = max(0.6, s * 0.07)
-        glass.contentsScale = scale
-        base.addSublayer(glass)
+        // Cap.
+        let cap = CGPath(roundedRect: CGRect(x: x - capW / 2, y: 0, width: capW, height: capH),
+                         cornerWidth: min(capW, capH) * 0.25, cornerHeight: min(capW, capH) * 0.25, transform: nil)
+        Sprite.fill(ctx, cap, Sprite.rgba(13, 13, 15, 1))
+        Sprite.stroke(ctx, cap, Sprite.rgba(255, 255, 255, 0.12), width: 0.6)
 
-        // The cap.
-        let cap = CALayer()
-        let cw = s * 0.42
-        cap.frame = CGRect(x: p.x - cw / 2, y: p.y - st.capHeight - 0.5, width: cw, height: st.capHeight + 0.5)
-        cap.backgroundColor = NSColor(white: 0.05, alpha: 1).cgColor
-        cap.cornerRadius = min(cw, st.capHeight) * 0.25
-        cap.borderColor = NSColor(white: 1, alpha: 0.12).cgColor
-        cap.borderWidth = 0.5
-        base.addSublayer(cap)
+        // Glass body and the light inside it.
+        Sprite.fill(ctx, glass, Sprite.rgba(255, 255, 255, 0.18 + 0.35 * gl))
+        if a > 0 {
+            Sprite.clipped(ctx, glass) {
+                Sprite.radial(ctx, center: CGPoint(x: x, y: cy), radius: s * 1.15, [
+                    (0, hslColor(w + 8, 1, 0.93, 0.95 * a)),
+                    (0.3, hslColor(w, 1, 0.72, (0.45 + 0.4 * gl) * a)),
+                    (1, hslColor(w - 4, 0.95, 0.55, (0.12 + 0.45 * gl) * a)),
+                ])
+            }
+        }
+        Sprite.stroke(ctx, glass, a > 0 ? hslColor(w, 1, 0.68, 0.25 + 0.45 * a) : Sprite.rgba(70, 65, 60, 0.4),
+                      width: max(0.6, s * 0.07))
 
-        // Filament supports and the filament itself, dark when off.
+        // Filament on its supports, and its bloom when lit.
         let supports = CGMutablePath()
         for dx in [-0.12 * s, 0.12 * s] {
-            supports.move(to: CGPoint(x: center.x + dx, y: center.y + s * 0.3))
-            supports.addLine(to: CGPoint(x: center.x + dx, y: center.y))
+            supports.move(to: CGPoint(x: x + dx, y: cy - s * 0.3))
+            supports.addLine(to: CGPoint(x: x + dx, y: cy))
         }
-        base.addSublayer(stroke(supports, color: NSColor(white: 0.4, alpha: 0.5).cgColor, width: max(0.4, s * 0.04)))
-        let fw = s * 0.32, fh = max(1.2, s * 0.18)
-        let filamentPath = CGPath(ellipseIn: CGRect(x: center.x - fw / 2, y: center.y - fh / 2, width: fw, height: fh), transform: nil)
-        let darkFilament = CAShapeLayer()
-        darkFilament.path = filamentPath
-        darkFilament.fillColor = NSColor(white: 0.42, alpha: 0.7).cgColor
-        base.addSublayer(darkFilament)
+        Sprite.stroke(ctx, supports, Sprite.rgba(110, 110, 115, 0.5), width: max(0.4, s * 0.04), cap: .butt)
+        let filament = Sprite.ellipse(x, cy, s * 0.16, max(0.6, s * 0.09))
+        Sprite.fill(ctx, filament, a > 0 ? hslColor(w + 15, 1, 0.7 + 0.28 * st.filament, 0.5 + 0.5 * a)
+                                         : Sprite.rgba(120, 110, 100, 0.7))
+        if a > 0 {
+            Sprite.radial(ctx, center: CGPoint(x: x, y: cy), radius: s * 0.55, [
+                (0, Sprite.rgba(255, 250, 235, 0.85 * a * st.filament)),
+                (1, Sprite.rgba(255, 240, 210, 0)),
+            ])
+        }
 
-        // Light inside the glass: bright at the filament, warmer to the edge.
-        let r = s * 1.15
-        let inner = radial(center: center, radius: r,
-                           colors: [st.light(0.95, hueShift: 8, lightness: 0.93),
-                                    st.light(0.45 + 0.4 * milk, lightness: 0.72),
-                                    st.light(0.12 + 0.45 * milk, hueShift: -4, saturation: 0.95, lightness: 0.55)],
-                           locations: [0, 0.3, 1])
-        inner.mask = mask(glassPath, in: inner.frame)
-        lit.addSublayer(inner)
-
-        // A warm rim where the lit glass catches the light.
-        let rim = CAShapeLayer()
-        rim.path = glassPath
-        rim.fillColor = nil
-        rim.strokeColor = st.light(0.6, lightness: 0.7)
-        rim.lineWidth = max(0.6, s * 0.07)
-        rim.contentsScale = scale
-        lit.addSublayer(rim)
-
-        // The hot filament and its small bloom.
-        let hot = CAShapeLayer()
-        hot.path = filamentPath
-        hot.fillColor = st.light(1, hueShift: 15, lightness: 0.7 + 0.28 * st.filament)
-        lit.addSublayer(hot)
-        lit.addSublayer(radial(center: center, radius: s * 0.55,
-                               colors: [NSColor(red: 1, green: 0.98, blue: 0.92, alpha: 0.85 * st.filament).cgColor,
-                                        NSColor(red: 1, green: 0.94, blue: 0.82, alpha: 0).cgColor],
-                               locations: [0, 1]))
-        base.addSublayer(lit)
-
-        // A highlight streak on the glass, over the light.
-        let streak = CAShapeLayer()
-        let hw = s * 0.22, hh = s * 0.84
-        streak.path = CGPath(ellipseIn: CGRect(x: p.x - s * 0.32 - hw / 2, y: gy + s * 0.15 - hh / 2, width: hw, height: hh),
-                             transform: nil)
-        streak.fillColor = NSColor(white: 1, alpha: 0.45).cgColor
-        let clip = CAShapeLayer()
-        clip.path = glassPath
-        let holder = CALayer()
-        holder.addSublayer(streak)
-        holder.mask = clip
-        base.addSublayer(holder)
-
-        return (base, lit)
+        // Highlight streak on the glass.
+        Sprite.clipped(ctx, glass) {
+            Sprite.fill(ctx, Sprite.ellipse(x - s * 0.32, gy - s * 0.15, s * 0.11, s * 0.42, rotation: -0.2),
+                        Sprite.rgba(255, 255, 255, 0.35 + 0.25 * (1 - a)))
+        }
     }
 
     /// Variant 1 of the design page: a flat warm drop with a strong halo.
-    private func cartoonBulb(at p: CGPoint, style st: GarlandStyle) -> (base: CALayer, lit: CALayer) {
-        let s = st.bulbSize
-        let base = CALayer()
-        let lit = CALayer()
-        let center = CGPoint(x: p.x, y: p.y - s * 1.1)
-        let body = CGRect(x: center.x - s * 0.75, y: center.y - s, width: s * 1.5, height: s * 2)
-
-        if let halo = halo(at: center, style: st) { lit.addSublayer(halo) }
-        let dark = CALayer()
-        dark.frame = body
-        dark.cornerRadius = s * 0.75
-        dark.backgroundColor = st.light(1, saturation: 0.35, lightness: 0.25)
-        base.addSublayer(dark)
-        let warm = CALayer()
-        warm.frame = body
-        warm.cornerRadius = s * 0.75
-        warm.backgroundColor = st.light(1, saturation: 0.95, lightness: 0.72)
-        lit.addSublayer(warm)
-        let core = CALayer()
-        let cw = s * 0.7, ch = s
-        core.frame = CGRect(x: center.x - cw / 2, y: center.y - ch / 2 + s * 0.15, width: cw, height: ch)
-        core.cornerRadius = cw / 2
-        core.backgroundColor = st.light(1, hueShift: 10, lightness: 0.92)
-        lit.addSublayer(core)
-        base.addSublayer(lit)
-        return (base, lit)
-    }
-
-    /// The halo of warm light around a bulb, fading out softly.
-    private func halo(at c: CGPoint, style st: GarlandStyle) -> CALayer? {
-        let k = st.haloStrength
-        guard k > 0.005, st.haloSize > 0 else { return nil }
-        return radial(center: c, radius: st.bulbSize * st.haloSize + 6,
-                      colors: [st.light(0.5 * k, saturation: 0.95, lightness: 0.66),
-                               st.light(0.22 * k, saturation: 0.95, lightness: 0.6),
-                               st.light(0.06 * k, saturation: 0.9, lightness: 0.55),
-                               st.light(0, saturation: 0.9, lightness: 0.5)],
-                      locations: [0, 0.22, 0.55, 1])
-    }
-
-    // MARK: Helpers
-
-    private func radial(center c: CGPoint, radius r: CGFloat, colors: [CGColor], locations: [NSNumber]) -> CAGradientLayer {
-        let layer = CAGradientLayer()
-        layer.type = .radial
-        layer.frame = CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2)
-        layer.colors = colors
-        layer.locations = locations
-        layer.startPoint = CGPoint(x: 0.5, y: 0.5)
-        layer.endPoint = CGPoint(x: 1, y: 1)
-        return layer
-    }
-
-    /// A mask shaped like `path`, for a layer whose frame is `frame`.
-    private func mask(_ path: CGPath, in frame: CGRect) -> CAShapeLayer {
-        let mask = CAShapeLayer()
-        var t = CGAffineTransform(translationX: -frame.minX, y: -frame.minY)
-        mask.path = path.copy(using: &t)
-        return mask
-    }
-
-    /// The glass outline of variant 2, narrow at the cap and round below,
-    /// around a reference point; AppKit coordinates, so "down" is minus.
-    private static func dropPath(x: CGFloat, y: CGFloat, s: CGFloat) -> CGPath {
-        let w = s * 0.62, h = s * 1.05
-        func pt(_ dx: CGFloat, _ dy: CGFloat) -> CGPoint { CGPoint(x: x + dx, y: y - dy) }
-        let path = CGMutablePath()
-        path.move(to: pt(-w * 0.45, -h))
-        path.addCurve(to: pt(-w, h * 0.2), control1: pt(-w * 0.5, -h * 0.5), control2: pt(-w, -h * 0.3))
-        path.addCurve(to: pt(w, h * 0.2), control1: pt(-w, h * 0.95), control2: pt(w, h * 0.95))
-        path.addCurve(to: pt(w * 0.45, -h), control1: pt(w, -h * 0.3), control2: pt(w * 0.5, -h * 0.5))
-        path.closeSubpath()
-        return path
+    private static func drawCartoon(_ ctx: CGContext, s: CGFloat, a: CGFloat, style st: GarlandStyle) {
+        let x: CGFloat = 0, cy = s * 1.1, w = st.warmth
+        if a > 0 { drawHalo(ctx, x: x, y: cy, r: s * st.haloSize + 6, k: st.haloStrength * a, warmth: w) }
+        Sprite.fill(ctx, Sprite.ellipse(x, cy, s * 0.75, s), hslColor(w, 0.35 + 0.6 * a, 0.3 + 0.52 * a))
+        if a > 0 {
+            Sprite.fill(ctx, Sprite.ellipse(x, cy - s * 0.15, s * 0.35, s * 0.5), hslColor(w + 10, 1, 0.92, a))
+        } else {
+            Sprite.fill(ctx, Sprite.ellipse(x - s * 0.25, cy - s * 0.35, s * 0.18, s * 0.28, rotation: -0.2),
+                        Sprite.rgba(255, 255, 255, 0.35))
+        }
     }
 
     private func stroke(_ path: CGPath, color: CGColor, width: CGFloat, cap: CAShapeLayerLineCap = .butt) -> CAShapeLayer {
@@ -346,6 +306,7 @@ final class GarlandLayers {
             a.repeatCount = .infinity
             a.beginTime = now
             a.isRemovedOnCompletion = false
+            a.calm()
             return a
         case .wave:
             let period = 2 * .pi / (GarlandLight.waveRate * g.speed)
@@ -360,6 +321,7 @@ final class GarlandLayers {
             let lag = Double(i) * GarlandLight.waveLag / (2 * .pi) * period
             a.timeOffset = period - lag.truncatingRemainder(dividingBy: period)
             a.isRemovedOnCompletion = false
+            a.calm()
             return a
         }
     }
