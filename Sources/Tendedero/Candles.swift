@@ -108,6 +108,10 @@ final class CandleLayers {
 
     /// The parts of each flame on screen, for a draft or a sputter to move.
     private var parts: [(sway: CALayer, stretch: CALayer, halo: CALayer, light: CALayer)] = []
+    /// Each flame's response to the air the pointer stirs, so a new gust
+    /// starts from where the flame is.
+    private var winds: [Wind] = []
+    private var unit: CGFloat = 0
     private var draftTimer: Timer?
     private var flickerAmount: Double = 0
 
@@ -132,6 +136,8 @@ final class CandleLayers {
         var flames: [CALayer] = []
         var lights: [CALayer] = []
         parts = []
+        winds = []
+        unit = u
         flickerAmount = Double(style.flicker)
 
         for (i, c) in style.layout.enumerated() {
@@ -158,6 +164,7 @@ final class CandleLayers {
             flames.append(flameLayer)
             if let stretch = flameLayer.sublayers?.first {
                 parts.append((flameLayer, stretch, halo, light))
+                winds.append(Wind(base: flameLayer.position))
             }
         }
         // The candles never change once drawn: cache them as one bitmap.
@@ -545,6 +552,93 @@ final class CandleLayers {
         // Redder glow as the flame dips, less as it flares.
         glow.add(flicker.animation("opacity", around: 0.75, by: -0.25 * f), forKey: "ember")
         return sway
+    }
+
+    // MARK: Air from the pointer
+
+    /// One flame's lean in the moving air, as a curve: pushed over quickly,
+    /// then swinging back to upright like a pendulum. Kept so that a new
+    /// gust continues from the flame's current lean instead of jumping.
+    struct Wind {
+        let base: CGPoint
+        var curve: [Double] = []
+        var start: CFTimeInterval = 0
+        static let step = 1.0 / 30
+
+        /// The lean now, in radians, as the curve playing says.
+        var lean: Double {
+            guard !curve.isEmpty else { return 0 }
+            let t = (CACurrentMediaTime() - start) / Self.step
+            if t >= Double(curve.count - 1) { return 0 }
+            let i = Int(t), f = t - Double(i)
+            return curve[i] + (curve[i + 1] - curve[i]) * f
+        }
+    }
+
+    /// A hand passing by: each flame within reach leans the way the air
+    /// moves, more the closer and the faster, dips and dims a little, and
+    /// settles back once the air is still. Played by Core Animation as
+    /// additive curves on top of the flicker; nothing runs per frame.
+    func feelAir(at p: CGPoint, velocity v: CGVector) {
+        guard flickerAmount > 0.01, !winds.isEmpty, root.superlayer?.speed != 0 else { return }
+        let speed = hypot(v.dx, v.dy)
+        guard speed > 40 else { return }
+        let reach = unit * 14
+        for (i, wind) in winds.enumerated() where i < parts.count {
+            // The flame and its glow sit above the wick.
+            let d = hypot(p.x - wind.base.x, p.y - (wind.base.y + unit * 0.8))
+            guard d < reach else { continue }
+            let near = pow(1 - d / reach, 2)
+            let strength = min(1, Double(speed) / 900) * Double(near)
+            // Air moving right pushes the tip right: a clockwise turn,
+            // which is negative with y up.
+            let push = -Double(v.dx / max(speed, 1)) * 0.45 * strength
+            let current = wind.lean
+            // A stronger gust takes over; a weaker one only if the flame
+            // is already nearly upright.
+            guard abs(push) > abs(current) * 0.6 || abs(current) < 0.02 else { continue }
+            let target = max(-0.5, min(0.5, current + push))
+            let curve = Self.gust(from: current, to: target)
+            winds[i].curve = curve
+            winds[i].start = CACurrentMediaTime()
+            let p = parts[i]
+            p.sway.add(windAnimation("transform.rotation.z", curve.map { $0 }), forKey: "wind")
+            // Pushed over, the flame shortens and its light dims with it.
+            let dip = curve.map { -abs($0) * 0.7 }
+            p.stretch.add(windAnimation("transform.scale.y", dip), forKey: "wind")
+            let dim = curve.map { -abs($0) * 0.6 }
+            p.halo.add(windAnimation("opacity", dim), forKey: "wind")
+            p.light.add(windAnimation("opacity", dim), forKey: "wind")
+        }
+    }
+
+    /// Over to `target` in a tenth of a second, then a damped swing back.
+    private static func gust(from a: Double, to b: Double) -> [Double] {
+        let step = Wind.step
+        let out = (0...3).map { i -> Double in
+            let t = Double(i) / 3
+            return a + (b - a) * (1 - (1 - t) * (1 - t))
+        }
+        let k = 26.0, c = 3.2
+        let wd = (k - c * c / 4).squareRoot(), decay = c / 2
+        let n = Int(2.2 / step)
+        let back = (1...n).map { i -> Double in
+            let t = Double(i) * step
+            return b * exp(-decay * t) * (cos(wd * t) + decay / wd * sin(wd * t))
+        }
+        return out + back + [0]
+    }
+
+    private func windAnimation(_ keyPath: String, _ values: [Double]) -> CAKeyframeAnimation {
+        let a = CAKeyframeAnimation(keyPath: keyPath)
+        a.values = values
+        a.calculationMode = .linear
+        a.duration = Wind.step * Double(values.count - 1)
+        a.isAdditive = true
+        if #available(macOS 12.0, *) {
+            a.preferredFrameRateRange = CAFrameRateRange(minimum: 24, maximum: 30, preferred: 30)
+        }
+        return a
     }
 
     // MARK: Drafts

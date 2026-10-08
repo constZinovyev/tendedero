@@ -88,10 +88,21 @@ final class GarlandController {
         mouseMoved()
     }
 
+    private var lastMouse: (point: CGPoint, time: CFTimeInterval)?
+
     private func mouseMoved() {
         let p = NSEvent.mouseLocation
+        let now = CACurrentMediaTime()
+        // How fast the pointer moves, in points a second: the air it stirs.
+        var velocity = CGVector.zero
+        if let last = lastMouse, now - last.time > 0.001, now - last.time < 0.25 {
+            let dt = now - last.time
+            velocity = CGVector(dx: (p.x - last.point.x) / dt, dy: (p.y - last.point.y) / dt)
+        }
+        lastMouse = (p, now)
         for window in windows.values where window.isVisible {
             window.catchMouse(window.decorView.hits(p))
+            window.decorView.feelAir(at: p, velocity: velocity)
         }
     }
 
@@ -269,6 +280,9 @@ final class DecorWindow: NSPanel {
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         ignoresMouseEvents = true
+        // Over the candles the window takes the mouse; keep its moves coming
+        // so the air keeps stirring right over the flames.
+        acceptsMouseMovedEvents = true
         level = Self.level
         contentView = decorView
         // Covered by other windows, on another Space or on a sleeping
@@ -459,6 +473,13 @@ final class DecorView: NSView {
 
     func hits(_ p: CGPoint) -> Bool {
         target != nil || hit(p) != nil
+    }
+
+    /// The pointer moving past the candles stirs the air around them.
+    func feelAir(at p: CGPoint, velocity: CGVector) {
+        guard case .candles = decor, let window, target == nil else { return }
+        let local = CGPoint(x: p.x - window.frame.minX, y: p.y - window.frame.minY)
+        candleLayers.feelAir(at: local, velocity: velocity)
     }
 
     override func mouseDown(with event: NSEvent) {
