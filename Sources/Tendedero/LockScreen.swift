@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import Combine
 import SwiftUI
 
 /// Experimental: the line while the Mac is locked.
@@ -23,7 +24,10 @@ final class LockScreen {
 
     private let line: Line
     private let panel: LinePanel
+    /// Garlands and candles hang on the lock screen too, where they are on the desktop.
+    private let decorations: Garlands
     private var observers: [NSObjectProtocol] = []
+    private var cancellables = Set<AnyCancellable>()
     private var pendingExport: DispatchWorkItem?
     /// The desktop video the pictures were last drawn over.
     private var exportedVideo: URL?
@@ -45,9 +49,13 @@ final class LockScreen {
             .appendingPathComponent("Library/Application Support/com.apple.wallpaper/Store/Index.plist")
     }
 
-    init(line: Line, panel: LinePanel) {
+    init(line: Line, panel: LinePanel, decorations: Garlands) {
         self.line = line
         self.panel = panel
+        self.decorations = decorations
+        decorations.objectWillChange
+            .sink { [weak self] _ in self?.scheduleExport() }
+            .store(in: &cancellables)
         // A crash or a quit while locked leaves the still up: put the real picture back.
         if !Self.screenIsLocked { restore() }
         export()
@@ -139,7 +147,7 @@ final class LockScreen {
     }
 
     func apply() {
-        guard Self.isEnabled, line.liveCount > 0,
+        guard Self.isEnabled,
               let screen = panel.screen ?? Placement.mainScreen else { return }
         // The pictures are kept current ahead of time, so locking only has
         // to put one up. Drawing it now would hold the line back by a second.
@@ -276,12 +284,16 @@ final class LockScreen {
     /// whatever distance from the top the line has on the desktop.
     static let lockedTop: CGFloat = 0.20
 
-    /// The whole screen, clear, with the line as if it were down: across the
-    /// same stretch as on the desktop, at the locked height.
+    /// The whole screen, clear: the garlands and candles where they hang on
+    /// the desktop, and the line as if it were down, across the same stretch
+    /// as on the desktop, at the locked height. Nil when there is nothing.
     private func drawLine(on screen: NSScreen) -> CGImage? {
         let items = line.items.filter { !$0.falling }
-        guard !items.isEmpty, let ctx = Self.context(Self.pixels(of: screen)) else { return nil }
+        let showDecorations = decorations.visible && !decorations.isEmpty && Placement.allows(screen)
+        guard !items.isEmpty || showDecorations, let ctx = Self.context(Self.pixels(of: screen)) else { return nil }
         let scale = screen.backingScaleFactor
+        if showDecorations { drawDecorations(on: screen, in: ctx) }
+        guard !items.isEmpty else { return ctx.makeImage() }
         let width = panel.frame.width
         let height = Layout.panelHeight
         let renderer = ImageRenderer(content: StillLine(items: items, width: width, topOffset: 0))
@@ -293,6 +305,21 @@ final class LockScreen {
                              y: (screen.frame.height - top - height) * scale)
         ctx.draw(still, in: CGRect(origin: origin, size: CGSize(width: width * scale, height: height * scale)))
         return ctx.makeImage()
+    }
+
+    /// The same layers the desktop shows, standing still: a blinking bulb or
+    /// a flickering flame is drawn as it rests.
+    private func drawDecorations(on screen: NSScreen, in ctx: CGContext) {
+        let scale = screen.backingScaleFactor
+        let garlands = GarlandLayers()
+        let candles = CandleLayers()
+        garlands.render(decorations.items, style: decorations.style, origin: screen.frame.origin, scale: scale)
+        candles.render(decorations.candles, style: decorations.candleStyle, origin: screen.frame.origin, scale: scale)
+        ctx.saveGState()
+        ctx.scaleBy(x: scale, y: scale)
+        candles.root.render(in: ctx)
+        garlands.root.render(in: ctx)
+        ctx.restoreGState()
     }
 
     /// The desktop picture filling the screen, and the line over it.
