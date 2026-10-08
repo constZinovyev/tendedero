@@ -108,8 +108,12 @@ struct SwayHost<Content: View>: NSViewRepresentable {
         view.forget()
     }
 
+    /// Pinned to the top, where the line runs: a hosting view would
+    /// otherwise centre the photo and leave a gap under the line.
     private var root: AnyView {
-        AnyView(content().coordinateSpace(name: Self.space))
+        AnyView(content()
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .coordinateSpace(name: Self.space))
     }
 }
 
