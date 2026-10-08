@@ -41,7 +41,12 @@ final class Line: ObservableObject {
 
     /// Card frames in window coordinates, reported by the views. The panel
     /// uses them to only catch clicks over photos and let the rest through.
-    var hitRects: [UUID: CGRect] = [:]
+    var hitRects: [UUID: CGRect] = [:] {
+        didSet { if hitRects != oldValue { onHitRectsChange?() } }
+    }
+    /// Lets the panel decide again whether to catch the mouse when a photo
+    /// appears or moves under a pointer that is standing still.
+    var onHitRectsChange: (() -> Void)?
 
     /// Each photo's swing, played by Core Animation.
     private var sways: [UUID: Sway] = [:]

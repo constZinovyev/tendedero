@@ -87,6 +87,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Markup.shared.onSaved = { [weak self] url in self?.line.reloadThumbnail(for: url) }
         line.onFall = { [weak self] item in self?.fall(item) }
         line.cardScreenFrame = { [weak self] id in self?.hangingFrame(for: id) }
+        line.onHitRectsChange = { [weak self] in
+            guard let self, self.isRevealed else { return }
+            self.updateMousePassThrough(NSEvent.mouseLocation)
+        }
 
         line.$items
             .receive(on: RunLoop.main)
