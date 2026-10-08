@@ -274,7 +274,7 @@ final class LockScreen {
     /// How far down the screen the line hangs while locked, as a fraction of
     /// the screen's height: below the big clock of the lock screen. Fixed,
     /// whatever distance from the top the line has on the desktop.
-    static let lockedTop: CGFloat = 0.22
+    static let lockedTop: CGFloat = 0.20
 
     /// The whole screen, clear, with the line as if it were down: across the
     /// same stretch as on the desktop, at the locked height.
