@@ -90,7 +90,10 @@ final class GarlandController {
 
     private var lastMouse: (point: CGPoint, time: CFTimeInterval)?
 
-    private func mouseMoved() {
+    /// Also called by a decoration's own window while the pointer is over
+    /// it: there it catches the mouse, and macOS no longer reports the
+    /// moves to the monitors above.
+    func mouseMoved() {
         let p = NSEvent.mouseLocation
         let now = CACurrentMediaTime()
         // How fast the pointer moves, in points a second: the air it stirs.
@@ -365,6 +368,21 @@ final class DecorView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// While the pointer is over a wire, a bulb or the candles, this window
+    /// catches the mouse and the global monitors fall silent. A tracking
+    /// area that is always active keeps the moves coming even though
+    /// Tendedero is not the active app, so the air never stops stirring.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        controller?.mouseMoved()
+    }
 
     private var garland: Garland? {
         guard case .garland(let id) = decor else { return nil }
