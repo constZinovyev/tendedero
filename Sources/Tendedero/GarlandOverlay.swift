@@ -477,9 +477,12 @@ final class DecorView: NSView {
 
     /// The pointer moving past the candles stirs the air around them.
     func feelAir(at p: CGPoint, velocity: CGVector) {
-        guard case .candles = decor, let window, target == nil else { return }
+        guard let window, target == nil else { return }
         let local = CGPoint(x: p.x - window.frame.minX, y: p.y - window.frame.minY)
-        candleLayers.feelAir(at: local, velocity: velocity)
+        switch decor {
+        case .candles: candleLayers.feelAir(at: local, velocity: velocity)
+        case .garland: if !store.editing { garlandLayers.feelAir(at: local, velocity: velocity) }
+        }
     }
 
     override func mouseDown(with event: NSEvent) {

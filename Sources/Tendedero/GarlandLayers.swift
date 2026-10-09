@@ -79,9 +79,19 @@ final class GarlandLayers {
     let root = CALayer()
     private var scale: CGFloat = 2
 
+    /// Each bulb on screen, so the air from the pointer can swing it.
+    private var swings: [BulbSwing] = []
+    /// The cached groups of dark and lit bulbs. Flattened while still,
+    /// taken apart only while bulbs swing.
+    private var groups: [CALayer] = []
+    private var reach: CGFloat = 80
+    private var flattenTimer: Timer?
+
     init() {
         root.masksToBounds = false
     }
+
+    deinit { MainActor.assumeIsolated { flattenTimer?.invalidate() } }
 
     /// Rebuilds every garland. `origin` is the screen's origin in global
     /// coordinates, so a garland is drawn where it belongs on this screen.
@@ -92,6 +102,9 @@ final class GarlandLayers {
         CATransaction.setDisableActions(true)
         root.frame = CGRect(origin: .zero, size: size)
         root.sublayers?.forEach { $0.removeFromSuperlayer() }
+        swings = []
+        groups = []
+        reach = max(80, style.bulbSize * 14)
         // One shared start time keeps every blinking garland in step.
         let now = CACurrentMediaTime()
         for g in garlands {
@@ -130,22 +143,28 @@ final class GarlandLayers {
                                          width: max(0.3, style.wireWidth * 0.3)))
         }
 
-        // The bulbs, each on its lead.
+        // The bulbs, each hanging on its lead from a point on the wire,
+        // in a holder that can swing about that point.
+        let dark = CALayer()
+        dark.frame = root.bounds
         let positions = geo.bulbPositions(spacing: g.spacing).map { CGPoint(x: $0.x - origin.x, y: $0.y - origin.y) }
         for (i, p) in positions.enumerated() {
-            if style.lead > 0 {
-                let path = CGMutablePath()
-                path.move(to: p)
-                path.addLine(to: CGPoint(x: p.x, y: p.y - style.lead))
-                fixed.addSublayer(stroke(path, color: ink, width: max(0.6, style.wireWidth * 0.6)))
+            let off = holder(bulbs.off, rect: bulbs.rect, wire: p, lead: style.lead,
+                             leadWidth: max(0.6, style.wireWidth * 0.6), ink: ink)
+            dark.addSublayer(off)
+            var lit: CALayer?
+            if !g.bulbsOff.contains(i) && g.mode != .off {
+                let l = holder(bulbs.on, rect: bulbs.rect, wire: p, lead: style.lead, leadWidth: nil, ink: ink)
+                l.opacity = Float(g.brightness)
+                light.addSublayer(l)
+                lit = l
             }
-            let attach = CGPoint(x: p.x, y: p.y - style.lead)
-            fixed.addSublayer(Sprite.layer(bulbs.off, rect: bulbs.rect, at: attach, scale: scale))
-            if g.bulbsOff.contains(i) || g.mode == .off { continue }
-            let lit = Sprite.layer(bulbs.on, rect: bulbs.rect, at: attach, scale: scale)
-            lit.opacity = Float(g.brightness)
-            light.addSublayer(lit)
+            swings.append(BulbSwing(center: CGPoint(x: p.x, y: p.y - style.lightDrop), off: off, lit: lit))
         }
+        dark.shouldRasterize = true
+        dark.rasterizationScale = scale
+        groups.append(dark)
+        groups.append(light)
         // The dark garland and the lit bulbs are each cached as one bitmap.
         // The light then moves as a whole: one animation per garland, not
         // one per bulb. Blinking fades the lit bitmap in and out; the wave
@@ -169,13 +188,144 @@ final class GarlandLayers {
                 masked.addSublayer(light)
                 masked.mask = mask
                 container.addSublayer(fixed)
+                container.addSublayer(dark)
                 container.addSublayer(masked)
                 return container
             }
         }
         container.addSublayer(fixed)
+        container.addSublayer(dark)
         container.addSublayer(light)
         return container
+    }
+
+    /// A bulb in its own small layer that turns about the point where its
+    /// lead meets the wire. Cached as a bitmap, so a swing only turns it.
+    private func holder(_ image: CGImage?, rect: CGRect, wire: CGPoint, lead: CGFloat,
+                        leadWidth: CGFloat?, ink: CGColor) -> CALayer {
+        let r = Sprite.aligned(rect, scale: scale)
+        // The sprite's rect is measured from where the bulb hangs, y down;
+        // the wire point is `lead` above that.
+        let top = min(r.minY, -lead), bottom = r.maxY
+        let w = r.width, h = bottom - top
+        let wx = -r.minX, wy = bottom + lead
+        let holder = CALayer()
+        holder.bounds = CGRect(x: 0, y: 0, width: w, height: h)
+        holder.anchorPoint = CGPoint(x: wx / w, y: wy / h)
+        holder.position = Sprite.snap(wire, scale: scale)
+        if let leadWidth, lead > 0 {
+            let path = CGMutablePath()
+            path.move(to: CGPoint(x: wx, y: wy))
+            path.addLine(to: CGPoint(x: wx, y: bottom))
+            holder.addSublayer(stroke(path, color: ink, width: leadWidth))
+        }
+        holder.addSublayer(Sprite.layer(image, rect: rect, at: CGPoint(x: wx, y: bottom), scale: scale))
+        holder.shouldRasterize = true
+        holder.rasterizationScale = scale
+        return holder
+    }
+
+    // MARK: Air from the pointer
+
+    /// One bulb's swing, kept so a new push continues from where it is.
+    private struct BulbSwing {
+        let center: CGPoint
+        let off: CALayer
+        let lit: CALayer?
+        var curve: [Double] = []
+        var start: CFTimeInterval = 0
+        var pushed: CFTimeInterval = 0
+        static let step = 1.0 / 30
+
+        var angle: Double {
+            guard !curve.isEmpty else { return 0 }
+            let t = (CACurrentMediaTime() - start) / Self.step
+            if t <= 0 { return curve[0] }
+            if t >= Double(curve.count - 1) { return 0 }
+            let i = Int(t), f = t - Double(i)
+            return curve[i] + (curve[i + 1] - curve[i]) * f
+        }
+    }
+
+    /// A hand passing by the bulbs: each one within reach is pushed the way
+    /// the air moves, more the closer and the faster, the push reaching
+    /// farther bulbs a moment later, and swings on its lead like a small
+    /// pendulum until it hangs still. Worked out once per push and played
+    /// by Core Animation; while bulbs swing they are separate layers, and
+    /// a few seconds after the last one stops they are flattened again.
+    func feelAir(at p: CGPoint, velocity v: CGVector) {
+        guard !swings.isEmpty, root.superlayer?.speed != 0 else { return }
+        let speed = hypot(v.dx, v.dy)
+        guard speed > 30 else { return }
+        let now = CACurrentMediaTime()
+        var until: CFTimeInterval = 0
+        for (i, s) in swings.enumerated() {
+            let d = hypot(p.x - s.center.x, p.y - s.center.y)
+            guard d < reach, now - s.pushed >= BulbSwing.step else { continue }
+            let near = pow(1 - d / reach, 1.6)
+            let strength = min(1, Double(speed) / 900) * Double(near)
+            guard strength > 0.03 else { continue }
+            // Air moving right pushes the bulb's bottom right: with the
+            // pivot above it, that is a counter-clockwise turn, positive.
+            let push = Double(v.dx / max(speed, 1)) * 0.35 * strength
+            let current = s.angle
+            let target = max(-0.45, min(0.45, current + push))
+            guard abs(target - current) > 0.015 || abs(current) < 0.01 else { continue }
+            let curve = Self.pendulum(from: current, to: target)
+            let delay = Double(d) / 1500
+            swings[i].curve = curve
+            swings[i].start = now + delay
+            swings[i].pushed = now
+            let a = CAKeyframeAnimation(keyPath: "transform.rotation.z")
+            a.values = curve
+            a.calculationMode = .linear
+            a.duration = BulbSwing.step * Double(curve.count - 1)
+            a.beginTime = now + delay
+            // Keep the current lean until the air arrives.
+            a.fillMode = .backwards
+            if #available(macOS 12.0, *) {
+                a.preferredFrameRateRange = CAFrameRateRange(minimum: 24, maximum: 30, preferred: 30)
+            }
+            s.off.add(a, forKey: "swing")
+            s.lit?.add(a, forKey: "swing")
+            until = max(until, now + delay + a.duration)
+        }
+        if until > 0 { unflatten(until: until) }
+    }
+
+    /// Over to `b` in a tenth of a second, then a small pendulum's swing,
+    /// a little under a second each way, dying away over a few seconds.
+    private static func pendulum(from a: Double, to b: Double) -> [Double] {
+        let step = BulbSwing.step
+        let out = (0...3).map { i -> Double in
+            let t = Double(i) / 3
+            return a + (b - a) * (1 - (1 - t) * (1 - t))
+        }
+        let k = 28.0, c = 1.1
+        let wd = (k - c * c / 4).squareRoot(), decay = c / 2
+        let duration = min(6, Foundation.log(max(abs(b), 0.006) / 0.005) / decay)
+        let n = max(2, Int(duration / step))
+        let back = (1...n).map { i -> Double in
+            let t = Double(i) * step
+            return b * exp(-decay * t) * (cos(wd * t) + decay / wd * sin(wd * t))
+        }
+        return out + back + [0]
+    }
+
+    /// Lets the bulbs move on their own until `until`, then caches them
+    /// as bitmaps again.
+    private func unflatten(until: CFTimeInterval) {
+        for g in groups where g.shouldRasterize { g.shouldRasterize = false }
+        flattenTimer?.invalidate()
+        let timer = Timer(timeInterval: max(0.1, until - CACurrentMediaTime() + 0.3), repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.flattenTimer = nil
+                for g in self.groups { g.shouldRasterize = true }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        flattenTimer = timer
     }
 
     // MARK: Bulb sprites
