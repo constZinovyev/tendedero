@@ -235,7 +235,12 @@ final class GarlandLayers {
         var curve: [Double] = []
         var start: CFTimeInterval = 0
         var pushed: CFTimeInterval = 0
-        static let step = 1.0 / 30
+        /// The swing is a smooth curve: 15 points a second, eased between
+        /// by Core Animation, look the same as 30 and cost half.
+        static let step = 1.0 / 15
+        /// New pushes at most 15 times a second: the push builds up over
+        /// time anyway, and a fifteenth of a second is too short to see.
+        static let pushEvery = 1.0 / 15
 
         var angle: Double {
             guard !curve.isEmpty else { return 0 }
@@ -270,7 +275,7 @@ final class GarlandLayers {
         var until: CFTimeInterval = 0
         for (i, s) in swings.enumerated() {
             let d = hypot(p.x - s.center.x, p.y - s.center.y)
-            guard d < reach, now - s.pushed >= BulbSwing.step else { continue }
+            guard d < reach, now - s.pushed >= BulbSwing.pushEvery else { continue }
             let near = pow(1 - d / reach, 1.4)
             // Air pushes like drag: with the square of the hand's speed,
             // for as long as it blows on the bulb. A slow hand barely stirs
@@ -290,7 +295,7 @@ final class GarlandLayers {
             swings[i].pushed = now
             let a = CAKeyframeAnimation(keyPath: "transform.rotation.z")
             a.values = curve
-            a.calculationMode = .linear
+            a.calculationMode = .cubic
             a.duration = BulbSwing.step * Double(curve.count - 1)
             a.beginTime = now + delay
             // Keep the current lean until the air arrives.
@@ -311,7 +316,7 @@ final class GarlandLayers {
     /// The swing never goes past about 45 degrees.
     private static func pendulum(angle a0: Double, velocity w0: Double) -> [Double] {
         let k = 17.0, c = 0.75, limit = 0.8
-        let step = BulbSwing.step, sub = 4, dt = step / Double(sub)
+        let step = BulbSwing.step, sub = 8, dt = step / Double(sub)
         var a = a0, w = w0
         var curve = [a]
         for _ in 0..<Int(8 / step) {

@@ -597,8 +597,9 @@ final class CandleLayers {
             // The flame and its glow sit above the wick.
             let d = hypot(p.x - wind.base.x, p.y - (wind.base.y + unit * 0.8))
             guard d < reach else { continue }
-            // At most 30 new curves a second, however fast the mouse reports.
-            guard now - max(wind.leanStart, wind.dipStart) >= Wind.step else { continue }
+            // At most 15 new curves a second, however fast the mouse reports:
+            // smothering builds up by time, and the curves stay detailed.
+            guard now - max(wind.leanStart, wind.dipStart) >= 1.0 / 15 else { continue }
             let near = pow(1 - d / reach, 1.6)
             let strength = min(1.2, Double(speed) / 800) * Double(near)
             guard strength > 0.03 else { continue }
@@ -620,7 +621,7 @@ final class CandleLayers {
             // about one and a half to two seconds of fast waving bring the
             // flame near out. Slower air only bends it. It fades on its own.
             let fast = max(0, strength - 0.35)
-            let smothered = min(1, wind.currentDip + fast * Wind.step * 0.9)
+            let smothered = min(1, wind.currentDip + fast * (1.0 / 15) * 0.9)
             if smothered > wind.currentDip + 0.005 {
                 let curve = Self.dipCurve(from: wind.currentDip, to: smothered)
                 winds[i].dip = curve
