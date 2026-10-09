@@ -245,6 +245,15 @@ final class GarlandLayers {
             let i = Int(t), f = t - Double(i)
             return curve[i] + (curve[i + 1] - curve[i]) * f
         }
+
+        /// How fast it is swinging now, in radians a second.
+        var velocity: Double {
+            guard curve.count > 1 else { return 0 }
+            let t = (CACurrentMediaTime() - start) / Self.step
+            if t <= 0 || t >= Double(curve.count - 1) { return 0 }
+            let i = Int(t)
+            return (curve[i + 1] - curve[i]) / Self.step
+        }
     }
 
     /// A hand passing by the bulbs: each one within reach is pushed the way
@@ -262,16 +271,19 @@ final class GarlandLayers {
         for (i, s) in swings.enumerated() {
             let d = hypot(p.x - s.center.x, p.y - s.center.y)
             guard d < reach, now - s.pushed >= BulbSwing.step else { continue }
-            let near = pow(1 - d / reach, 1.6)
-            let strength = min(1, Double(speed) / 900) * Double(near)
-            guard strength > 0.03 else { continue }
-            // Air moving right pushes the bulb's bottom right: with the
-            // pivot above it, that is a counter-clockwise turn, positive.
-            let push = Double(v.dx / max(speed, 1)) * 0.35 * strength
-            let current = s.angle
-            let target = max(-0.45, min(0.45, current + push))
-            guard abs(target - current) > 0.015 || abs(current) < 0.01 else { continue }
-            let curve = Self.pendulum(from: current, to: target)
+            let near = pow(1 - d / reach, 1.4)
+            // Air pushes like drag: with the square of the hand's speed,
+            // for as long as it blows on the bulb. A slow hand barely stirs
+            // it; a quick sweep sets it going.
+            let strength = min(7, pow(Double(speed) / 650, 2)) * Double(near)
+            let blowing = min(0.1, now - s.pushed)
+            // It gives the bulb speed, not a new angle: air moving right
+            // pushes its bottom right, which with the pivot above is a
+            // counter-clockwise turn, positive. Pushes in time with the
+            // swing add up, as on a swing.
+            let kick = Double(v.dx / max(speed, 1)) * 12 * strength * blowing
+            guard abs(kick) > 0.05 else { continue }
+            let curve = Self.pendulum(angle: s.angle, velocity: s.velocity + kick)
             let delay = Double(d) / 1500
             swings[i].curve = curve
             swings[i].start = now + delay
@@ -293,23 +305,27 @@ final class GarlandLayers {
         if until > 0 { unflatten(until: until) }
     }
 
-    /// Over to `b` in a tenth of a second, then a small pendulum's swing,
-    /// a little under a second each way, dying away over a few seconds.
-    private static func pendulum(from a: Double, to b: Double) -> [Double] {
-        let step = BulbSwing.step
-        let out = (0...3).map { i -> Double in
-            let t = Double(i) / 3
-            return a + (b - a) * (1 - (1 - t) * (1 - t))
+    /// A small pendulum set going from `angle` at `velocity`: it carries
+    /// on by its own inertia, about a second and a half to and fro, dying
+    /// away slowly. Worked out once, in small steps, until it is still.
+    /// The swing never goes past about 45 degrees.
+    private static func pendulum(angle a0: Double, velocity w0: Double) -> [Double] {
+        let k = 17.0, c = 0.75, limit = 0.8
+        let step = BulbSwing.step, sub = 4, dt = step / Double(sub)
+        var a = a0, w = w0
+        var curve = [a]
+        for _ in 0..<Int(8 / step) {
+            for _ in 0..<sub {
+                w += (-k * a - c * w) * dt
+                a += w * dt
+                // Past the limit it is held back softly, like a lead pulled taut.
+                if abs(a) > limit { a = limit * (a > 0 ? 1 : -1); w *= -0.3 }
+            }
+            curve.append(a)
+            if abs(a) < 0.004 && abs(w) < 0.03 { break }
         }
-        let k = 28.0, c = 1.1
-        let wd = (k - c * c / 4).squareRoot(), decay = c / 2
-        let duration = min(6, Foundation.log(max(abs(b), 0.006) / 0.005) / decay)
-        let n = max(2, Int(duration / step))
-        let back = (1...n).map { i -> Double in
-            let t = Double(i) * step
-            return b * exp(-decay * t) * (cos(wd * t) + decay / wd * sin(wd * t))
-        }
-        return out + back + [0]
+        curve.append(0)
+        return curve
     }
 
     /// Lets the bulbs move on their own until `until`, then caches them
@@ -317,7 +333,9 @@ final class GarlandLayers {
     private func unflatten(until: CFTimeInterval) {
         for g in groups where g.shouldRasterize { g.shouldRasterize = false }
         flattenTimer?.invalidate()
-        let timer = Timer(timeInterval: max(0.1, until - CACurrentMediaTime() + 0.3), repeats: false) { [weak self] _ in
+        // A second of slack, so quick repeated pushes do not flatten and
+        // unflatten the bitmaps over and over.
+        let timer = Timer(timeInterval: max(0.1, until - CACurrentMediaTime() + 1), repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.flattenTimer = nil
