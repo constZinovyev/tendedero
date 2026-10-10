@@ -1,10 +1,10 @@
 import AVFoundation
 import AppKit
 
-/// The gull's voice: recordings of real herring gulls, cut into single
-/// calls, a few long calls, alarm calls and calls in flight. Each is played
-/// a little faster or slower now and then, so they do not repeat exactly,
-/// quietly, and from the side of the screen the bird is on.
+/// The gull's voice: one real herring gull, cut into single calls, long
+/// calls, alarm calls and calls in flight. Always the same bird, one call
+/// at a time, so it never sounds like a flock; quietly, and from the side
+/// of the screen the bird is on.
 @MainActor
 final class GullVoice {
     enum Kind: String, CaseIterable {
@@ -40,14 +40,14 @@ final class GullVoice {
     func play(_ kind: Kind, at p: CGPoint) {
         guard isOn else { return }
         playing.removeAll { !$0.isPlaying }
-        // Never more than two at once.
-        guard playing.count < 2 else { return }
+        // One bird, one call at a time.
+        guard playing.isEmpty else { return }
         let options = (clips[kind] ?? []).filter { $0 != last[kind] }
         guard let url = options.randomElement() ?? clips[kind]?.first,
               let player = try? AVAudioPlayer(contentsOf: url) else { return }
         last[kind] = url
         player.enableRate = true
-        player.rate = .random(in: 0.94...1.06)
+        player.rate = .random(in: 0.98...1.02)
         player.volume = kind == .flight ? 0.22 : 0.32
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(p) }) ?? NSScreen.main {
             let x = (p.x - screen.frame.midX) / (screen.frame.width / 2)
