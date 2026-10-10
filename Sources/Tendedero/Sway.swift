@@ -29,6 +29,53 @@ final class Sway {
         return samples[i] + (samples[i + 1] - samples[i]) * f
     }
 
+    /// How fast it swings now, in degrees a second.
+    var speed: Double {
+        guard samples.count > 1 else { return 0 }
+        let t = (CACurrentMediaTime() - start) / Self.step
+        guard t >= 0, t < Double(samples.count - 1) else { return 0 }
+        let i = Int(t)
+        return (samples[i + 1] - samples[i]) / Self.step
+    }
+
+    private var pushed: CFTimeInterval = 0
+
+    /// Air from the pointer moving across the photo at `vx` points a
+    /// second, `depth` of the way down it. Like drag, with the square of
+    /// the speed, for as long as it blows: a slow hand barely stirs it, a
+    /// quick sweep swings it a few degrees. It carries on by its own
+    /// inertia and dies away.
+    func push(byAirAt vx: Double, depth: Double) {
+        let now = CACurrentMediaTime()
+        guard now - pushed >= 1.0 / 15 else { return }
+        let blowing = min(0.1, now - pushed)
+        pushed = now
+        // Air moving right pushes the bottom right: anticlockwise, negative
+        // the way SwiftUI counts.
+        let kick = -(vx * abs(vx) / 1000) * 0.004 * depth * blowing * 15
+        guard abs(kick) > 0.2 else { return }
+        let w = max(-16, min(16, speed + kick))
+        play(Self.pendulum(angle: angle, velocity: w))
+    }
+
+    /// A photo swinging on its pin from `a` at `w` degrees a second: about
+    /// a second and a half to and fro, dying away over a few seconds.
+    private static func pendulum(angle a0: Double, velocity w0: Double) -> [Double] {
+        let k = 16.0, c = 1.2, sub = 4, dt = step / Double(sub)
+        var a = a0, w = w0
+        var curve = [a]
+        for _ in 0..<Int(7 / step) {
+            for _ in 0..<sub {
+                w += (-k * a - c * w) * dt
+                a += w * dt
+            }
+            curve.append(a)
+            if abs(a) < 0.02 && abs(w) < 0.1 { break }
+        }
+        curve.append(0)
+        return curve
+    }
+
     /// A little push: out to `degrees` and back, settling like a pendulum.
     func nudge(_ degrees: Double) {
         let from = angle

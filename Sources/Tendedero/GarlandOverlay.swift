@@ -105,6 +105,8 @@ final class GarlandController {
         lastMouse = (p, now)
         for window in windows.values where window.isVisible {
             window.catchMouse(window.decorView.hits(p))
+            // Uncovered just now: the notice may come late, so look.
+            window.decorView.setPaused(!window.occlusionState.contains(.visible))
             window.decorView.feelAir(at: p, velocity: velocity)
         }
     }

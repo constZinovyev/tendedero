@@ -17,6 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var signalSources: [DispatchSourceSignal] = []
     private var hotKeys: [HotKey] = []
     private var garlands: GarlandController!
+    private let pointerRelay = PointerRelay()
+    private var noNap: NSObjectProtocol?
     private var seagulls: Seagulls!
     private var lockScreen: LockScreen!
     private var cancellables = Set<AnyCancellable>()
@@ -61,8 +63,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let host = NSHostingView(rootView: LineView(line: line))
         host.sizingOptions = []
         panel = LinePanel(content: host)
+        // Over a photo the panel catches the mouse and macOS stops reporting
+        // its moves to the monitors; this keeps them coming, so the panel
+        // lets go the moment the pointer leaves the photo.
+        pointerRelay.onMove = { [weak self] in
+            self?.tick()
+            self?.garlands?.mouseMoved()
+        }
+        host.addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeAlways, .inVisibleRect],
+                                            owner: pointerRelay, userInfo: nil))
         panel.placeOnScreen()
         updateCapacity()
+
+        // Tendedero sits in the background all day. Napping, macOS would
+        // hand it the pointer's moves late, and the decorations would wake
+        // up a moment after the pointer reached them. When nothing moves it
+        // does nothing anyway.
+        noNap = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep],
+                                                      reason: "The line and the decorations answer the pointer")
 
         if Inbox.isEnabled { Inbox.apply() }
         restoreSettingsOnTermination()
@@ -520,6 +538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         updateMousePassThrough(mouse)
+        stirPhotos(mouse)
 
         // The line's zone runs from its lowest point up to the top of the
         // screen, menu bar included, so moving up never hides it.
@@ -545,11 +564,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private var lastPointer: (point: NSPoint, time: CFTimeInterval)?
+
+    /// The pointer moving across the photos stirs the air: each one it
+    /// passes swings a little, more for a quick sweep, and carries on by
+    /// its own inertia.
+    private func stirPhotos(_ mouse: NSPoint) {
+        let now = CACurrentMediaTime()
+        defer { lastPointer = (mouse, now) }
+        guard let last = lastPointer, now - last.time > 0.001, now - last.time < 0.25,
+              GrabView.isDragging == false, line.slidingID == nil, line.pressedID == nil else { return }
+        let vx = (mouse.x - last.point.x) / (now - last.time)
+        guard abs(vx) > 40 else { return }
+        let local = panel.convertPoint(fromScreen: mouse)
+        let p = CGPoint(x: local.x, y: panel.frame.height - local.y)
+        for (id, rect) in line.hitRects where rect.insetBy(dx: -6, dy: -6).contains(p) {
+            // Lower down the card the same air turns it more.
+            let depth = min(1, max(0.3, (p.y - rect.minY + 14) / rect.height))
+            line.sway(id).push(byAirAt: Double(vx), depth: Double(depth))
+        }
+    }
+
     /// The panel spans the whole width of the screen, so it only accepts the
     /// mouse while the cursor is over a photo. Everywhere else, clicks go to
     /// whatever is underneath.
     private func updateMousePassThrough(_ mouse: NSPoint) {
-        guard !GrabView.isDragging, line.slidingID == nil else { return }
+        // While a button is held the panel stays as it is, so a click
+        // or a double click is never cut in half when a photo is redrawn.
+        guard !GrabView.isDragging, line.slidingID == nil, NSEvent.pressedMouseButtons == 0 else { return }
         let local = panel.convertPoint(fromScreen: mouse)
         let flipped = CGPoint(x: local.x, y: panel.frame.height - local.y)
         let overPhoto = line.hitRects.values.contains { $0.insetBy(dx: -4, dy: -4).contains(flipped) }
@@ -817,4 +859,10 @@ final class SliderMenuView: NSView {
         showValue()
         onChange(slider.doubleValue)
     }
+}
+
+/// Passes on the mouse moves a tracking area reports.
+final class PointerRelay: NSResponder {
+    var onMove: () -> Void = {}
+    override func mouseMoved(with event: NSEvent) { onMove() }
 }
