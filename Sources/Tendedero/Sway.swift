@@ -156,18 +156,25 @@ struct SwayHost<Content: View>: NSViewRepresentable {
     let id: UUID
     let sway: Sway
     let line: Line
+    /// What the content is drawn from. The content follows the line's
+    /// state by itself; it is handed over again only when this changes, so
+    /// a hover or a press on one photo leaves the others' views alone.
+    let item: Pegged
     @ViewBuilder let content: () -> Content
 
     func makeNSView(context: Context) -> SwayView {
         let view = SwayView(id: id, line: line)
         sway.view = view
         view.setRoot(root)
+        view.shown = item
         return view
     }
 
     func updateNSView(_ view: SwayView, context: Context) {
         sway.view = view
+        guard view.shown != item else { return }
         view.setRoot(root)
+        view.shown = item
     }
 
     static func dismantleNSView(_ view: SwayView, coordinator: ()) {
@@ -190,6 +197,8 @@ final class SwayView: NSView {
     private var host: NSHostingView<AnyView>?
     /// The card's rect inside this view, y down, as the card reported it.
     private var cardRect: CGRect?
+    /// The photo as its content was last drawn from.
+    var shown: Pegged?
 
     init(id: UUID, line: Line) {
         self.id = id

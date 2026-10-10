@@ -45,8 +45,6 @@ final class CaptureFlight {
     private let tilt: CGFloat
     private var falling = false
     private var duration: CFTimeInterval = CaptureFlight.duration
-    private var start: CFTimeInterval = 0
-    private var timer: Timer?
     private var completion: () -> Void = {}
 
     private static var current: [CaptureFlight] = []
@@ -153,27 +151,65 @@ final class CaptureFlight {
 
     private func finish() {
         window.orderOut(nil)
+        for track in tracks { track.layer.removeAllAnimations() }
         container.removeFromSuperlayer()
         if Self.spare.count < 3 { Self.spare.append(window) }
     }
 
-    private func run() {
-        if falling { update(1); updateFall(0) } else { update(0) }
-        window.orderFrontRegardless()
-        start = CACurrentMediaTime()
-        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+    /// Every property the motion moves, layer by layer.
+    private var tracks: [(layer: CALayer, keys: [String])] {
+        [(container, ["bounds", "position", "transform", "shadowPath", "opacity"]),
+         (glass, ["bounds", "position", "cornerRadius", "opacity"]),
+         (edge, ["bounds", "position", "opacity"]),
+         (edgeMask, ["path"]),
+         (photo, ["bounds", "position", "cornerRadius"]),
+         (clip, ["bounds", "position", "opacity"])]
     }
 
-    private func tick() {
-        let k = min(1, (CACurrentMediaTime() - start) / duration)
-        if falling { updateFall(k) } else { update(k) }
-        guard k >= 1 else { return }
-        timer?.invalidate()
-        timer = nil
+    /// The whole motion is worked out up front, sampled finely, and handed
+    /// to Core Animation, which plays it on its own: nothing runs on the
+    /// main thread meanwhile, and nothing there can make it stutter.
+    private func run() {
+        if falling { update(1) }
+        let steps = max(2, Int(duration * 120))
+        let tracks = self.tracks
+        var values = tracks.map { $0.keys.map { _ in [Any]() } }
+        for i in 0...steps {
+            let k = Double(i) / Double(steps)
+            if falling { updateFall(k) } else { update(k) }
+            for (t, track) in tracks.enumerated() {
+                for (j, key) in track.keys.enumerated() {
+                    values[t][j].append(track.layer.value(forKey: key) ?? NSNull())
+                }
+            }
+        }
+        // The layers now hold where the motion ends; the animations play
+        // the way there.
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [self] in
+            MainActor.assumeIsolated { landed() }
+        }
+        for (t, track) in tracks.enumerated() {
+            for (j, key) in track.keys.enumerated() {
+                let samples = values[t][j]
+                // What does not change is not animated.
+                guard let first = samples.first as AnyObject?,
+                      samples.contains(where: { !first.isEqual($0) }) else { continue }
+                let a = CAKeyframeAnimation(keyPath: key)
+                a.values = samples
+                a.duration = duration
+                a.calculationMode = .linear
+                if #available(macOS 12.0, *) {
+                    a.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+                }
+                track.layer.add(a, forKey: "flight.\(key)")
+            }
+        }
+        window.orderFrontRegardless()
+        CATransaction.commit()
+    }
+
+    private func landed() {
         completion()
         if falling {
             finish()

@@ -12,8 +12,9 @@ import SwiftUI
 /// Dragged sideways, the photo slides along the line to any spot instead.
 /// Pulling it down off the line turns the slide into a drag out.
 ///
-/// Click copies, double click shows it large, press and hold opens Markup,
-/// the corner cross discards. Whatever you click or slide comes to the front.
+/// A click brings it to the front, a double click shows it large, press and
+/// hold opens Markup, the corner cross discards, Copy is in its menu.
+/// Whatever you click or slide comes to the front.
 struct GrabArea: NSViewRepresentable {
     let item: Pegged
     let line: Line
@@ -33,10 +34,7 @@ struct GrabArea: NSViewRepresentable {
         let line = line
         view.url = item.url
         view.dragImage = item.thumb
-        view.onClick = {
-            line.copy(id)
-            line.bringToFront(id)
-        }
+        view.onClick = { line.bringToFront(id) }
         view.onDoubleClick = { line.show(id) }
         view.onSlideStart = { line.beginSlide(id) }
         view.onSlide = { dx in line.slide(id, by: dx) }

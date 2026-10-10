@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import Combine
+import Metal
 import SwiftUI
 
 /// Experimental: the line while the Mac is locked.
@@ -335,16 +336,6 @@ final class LockScreen {
         let key = DecorKey(items: decorations.items, style: decorations.style, candles: decorations.candles,
                            candleStyle: decorations.candleStyle, frame: screen.frame, scale: screen.backingScaleFactor)
         if let cached = decorCache, cached.key == key { return cached.image }
-        guard let ctx = Self.context(Self.pixels(of: screen)) else { return nil }
-        drawDecorations(on: screen, in: ctx)
-        guard let image = ctx.makeImage() else { return nil }
-        decorCache = (key, image)
-        return image
-    }
-
-    /// The same layers the desktop shows, standing still: a blinking bulb or
-    /// a flickering flame is drawn as it rests.
-    private func drawDecorations(on screen: NSScreen, in ctx: CGContext) {
         let scale = screen.backingScaleFactor
         let garlands = GarlandLayers()
         let candles = CandleLayers()
@@ -352,11 +343,86 @@ final class LockScreen {
                         size: screen.frame.size, scale: scale)
         candles.render(decorations.candles, style: decorations.candleStyle, origin: screen.frame.origin,
                        size: screen.frame.size, scale: scale)
-        ctx.saveGState()
+        let pixels = Self.pixels(of: screen)
+        guard let image = Self.renderOnGPU([candles.root, garlands.root], pixels: pixels, scale: scale)
+                ?? Self.renderOnCPU([candles.root, garlands.root], pixels: pixels, scale: scale) else { return nil }
+        decorCache = (key, image)
+        return image
+    }
+
+    /// The same layers the desktop shows, standing still: a blinking bulb or
+    /// a flickering flame is drawn as it rests. Drawn by Core Animation on
+    /// the graphics card, as on screen: drawing them on the processor took
+    /// over a second, most of it in a scratch copy of the whole screen for
+    /// every dimmed bulb.
+    private static let gpu = MTLCreateSystemDefaultDevice()
+
+    private static func renderOnGPU(_ roots: [CALayer], pixels: CGSize, scale: CGFloat) -> CGImage? {
+        guard let device = gpu, let queue = device.makeCommandQueue() else { return nil }
+        let w = Int(pixels.width), h = Int(pixels.height)
+        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: false)
+        desc.usage = [.renderTarget, .shaderRead]
+        desc.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: desc) else { return nil }
+
+        // Standing still: no blink, no flicker, as the processor drew them.
+        func still(_ layer: CALayer) {
+            layer.removeAllAnimations()
+            layer.mask.map(still)
+            layer.sublayers?.forEach(still)
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        // The layers are laid out in points; the texture is in pixels.
+        let stage = CALayer()
+        stage.frame = CGRect(x: 0, y: 0, width: pixels.width, height: pixels.height)
+        let points = CALayer()
+        points.anchorPoint = .zero
+        points.bounds = CGRect(x: 0, y: 0, width: pixels.width / scale, height: pixels.height / scale)
+        points.position = .zero
+        points.transform = CATransform3DMakeScale(scale, scale, 1)
+        stage.addSublayer(points)
+        for root in roots {
+            still(root)
+            points.addSublayer(root)
+        }
+        CATransaction.commit()
+
+        let renderer = CARenderer(mtlTexture: texture, options: [
+            kCARendererColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
+            kCARendererMetalCommandQueue: queue,
+        ])
+        renderer.layer = stage
+        renderer.bounds = stage.frame
+        // The renderer only sees the layers once they are committed to it.
+        CATransaction.begin()
+        CATransaction.commit()
+        CATransaction.flush()
+        renderer.beginFrame(atTime: CACurrentMediaTime(), timeStamp: nil)
+        renderer.addUpdate(renderer.bounds)
+        renderer.render()
+        renderer.endFrame()
+        // Same queue: once this is done, so is the drawing.
+        guard let done = queue.makeCommandBuffer() else { return nil }
+        done.commit()
+        done.waitUntilCompleted()
+
+        for root in roots { root.removeFromSuperlayer() }
+        // The texture's rows run bottom up, a bitmap's top down.
+        guard let ctx = context(pixels), let data = ctx.data else { return nil }
+        let row = ctx.bytesPerRow
+        for y in 0..<h {
+            texture.getBytes(data + (h - 1 - y) * row, bytesPerRow: row,
+                             from: MTLRegionMake2D(0, y, w, 1), mipmapLevel: 0)
+        }
+        return ctx.makeImage()
+    }
+
+    private static func renderOnCPU(_ roots: [CALayer], pixels: CGSize, scale: CGFloat) -> CGImage? {
+        guard let ctx = context(pixels) else { return nil }
         ctx.scaleBy(x: scale, y: scale)
-        candles.root.render(in: ctx)
-        garlands.root.render(in: ctx)
-        ctx.restoreGState()
+        for root in roots { root.render(in: ctx) }
+        return ctx.makeImage()
     }
 
     /// The desktop picture filling the screen, and the line over it.

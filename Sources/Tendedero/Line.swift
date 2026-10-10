@@ -107,9 +107,10 @@ final class Line: ObservableObject {
     // MARK: Hanging and dropping
 
     @discardableResult
-    func hang(_ url: URL, quietly: Bool = false, flying: Bool = false, at position: Double? = nil) -> UUID? {
+    func hang(_ url: URL, thumb: NSImage? = nil, quietly: Bool = false, flying: Bool = false,
+              at position: Double? = nil) -> UUID? {
         guard !items.contains(where: { $0.url == url && !$0.falling }),
-              let thumb = makeThumbnail(url) else { return nil }
+              let thumb = thumb ?? makeThumbnail(url) else { return nil }
         var item = Pegged(url: url, thumb: thumb)
         item.flying = flying
         item.position = clamped(position ?? freeSpot())
@@ -322,9 +323,13 @@ final class Line: ObservableObject {
 
     /// After editing, the photo on the line shows the new version.
     func reloadThumbnail(for url: URL) {
-        guard let i = items.firstIndex(where: { $0.url == url && !$0.falling }),
-              let thumb = makeThumbnail(url) else { return }
-        items[i].thumb = thumb
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let thumb = makeThumbnail(url) else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let i = self.items.firstIndex(where: { $0.url == url && !$0.falling }) else { return }
+                self.items[i].thumb = thumb
+            }
+        }
     }
 
     func reveal(_ id: UUID) {
@@ -385,11 +390,18 @@ final class Line: ObservableObject {
         let paths = (UserDefaults.standard.stringArray(forKey: storeKey) ?? [])
             .filter { FileManager.default.fileExists(atPath: $0) }
         let positions = UserDefaults.standard.dictionary(forKey: positionsKey) as? [String: Double] ?? [:]
-        for (index, path) in paths.enumerated() {
+        // The cards' pictures are made side by side on every core, so the
+        // line is ready sooner at launch.
+        let urls = paths.map { URL(fileURLWithPath: $0) }
+        let thumbs = UnsafeMutableBufferPointer<NSImage?>.allocate(capacity: urls.count)
+        thumbs.initialize(repeating: nil)
+        defer { _ = thumbs.deinitialize(); thumbs.deallocate() }
+        DispatchQueue.concurrentPerform(iterations: urls.count) { i in thumbs[i] = makeThumbnail(urls[i]) }
+        for (index, url) in urls.enumerated() {
             // Lines saved before photos could be moved keep their old, even layout.
-            let position = positions[path]
+            let position = positions[url.path]
                 ?? Double(Layout.x(index: index, count: paths.count, width: width) / width)
-            hang(URL(fileURLWithPath: path), quietly: true, at: position)
+            if let thumb = thumbs[index] { hang(url, thumb: thumb, quietly: true, at: position) }
         }
     }
 

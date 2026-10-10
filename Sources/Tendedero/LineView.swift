@@ -48,7 +48,7 @@ struct LineView: View {
                 ForEach(line.items.sorted { $0.id.uuidString < $1.id.uuidString }) { item in
                     let x = CGFloat(item.position) * width
                     let ropeY = Layout.ropeY(x: x, width: width)
-                    SwayHost(id: item.id, sway: line.sway(item.id), line: line) {
+                    SwayHost(id: item.id, sway: line.sway(item.id), line: line, item: item) {
                         PeggedView(item: item, line: line)
                     }
                         .frame(width: Layout.cardWidth, height: Layout.panelHeight - ropeY, alignment: .top)

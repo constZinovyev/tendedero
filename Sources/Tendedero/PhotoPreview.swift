@@ -124,7 +124,7 @@ private final class Session {
     private let card: () -> CGRect?
     private let target: CGRect
     private var monitors: [Any] = []
-    private var timer: Timer?
+    private var isOpen = false
     private var hoveredCorner: PreviewStage.Corner?
 
     init(image: NSImage, panel: PreviewPanel, screen: NSScreen, card: @escaping () -> CGRect?,
@@ -136,11 +136,9 @@ private final class Session {
         model = PreviewModel(image: image)
         model.maxSize = screen.visibleFrame.size
         if panel.frame != screen.frame { panel.setFrame(screen.frame, display: false) }
-        if let host = panel.contentView as? NSHostingView<PreviewStage> {
-            host.rootView = PreviewStage(model: model)
-        } else {
-            panel.contentView = NSHostingView(rootView: PreviewStage(model: model))
-        }
+        // A fresh view each time, which starts from the card: a reused one
+        // would grow from where the last photo ended up.
+        panel.contentView = NSHostingView(rootView: PreviewStage(model: model))
         panel.onDismiss = { [weak self] in self?.onDismiss() }
         model.onClose = { [weak self] in self?.onDismiss() }
 
@@ -168,7 +166,7 @@ private final class Session {
 
     /// The full photo, read in the background, in place of the card's picture.
     func showFull(_ image: NSImage) {
-        guard timer != nil else { return }
+        guard isOpen else { return }
         model.image = image
     }
 
@@ -187,7 +185,7 @@ private final class Session {
         }
 
         // A click anywhere but on the photo sends it back. Those clicks still
-        // go through, so clicking another card copies it as usual.
+        // go through, so clicking another card brings it to the front as usual.
         let dismiss: (NSEvent?) -> Void = { [weak self] _ in
             MainActor.assumeIsolated { self?.onDismiss() }
         }
@@ -202,11 +200,24 @@ private final class Session {
             monitors.append(local)
         }
 
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.trackMouse() }
+        // The pointer is followed through its moves, not polled: a preview
+        // left open costs nothing while the mouse rests. Each move is looked
+        // at once more after AppKit has handled it, since it resets the
+        // cursor on the way.
+        let moved: (NSEvent?) -> Void = { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.trackMouse()
+                DispatchQueue.main.async { self?.trackMouse() }
+            }
         }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+        let moves: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .leftMouseUp]
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: moves, handler: moved) { monitors.append(global) }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: moves, handler: { e in moved(e); return e }) {
+            monitors.append(local)
+        }
+        panel.acceptsMouseMovedEvents = true
+        isOpen = true
+        trackMouse()
     }
 
     /// The window only takes the mouse over the photo and its corners, and
@@ -246,8 +257,7 @@ private final class Session {
     /// Flies back into the card, or fades where it is when the card is not
     /// in view. Without an animation it is gone at once.
     func close(animation: Animation?) {
-        timer?.invalidate()
-        timer = nil
+        isOpen = false
         monitors.forEach(NSEvent.removeMonitor)
         monitors.removeAll()
         panel.ignoresMouseEvents = true

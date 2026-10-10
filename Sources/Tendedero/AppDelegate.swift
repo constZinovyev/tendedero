@@ -265,12 +265,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// A new screenshot lifts off from where it was taken and flies to its
     /// place on the line. Without a known capture area it simply drops in.
     private func hangCapture(_ url: URL) {
+        // The card's picture is made in the background; the line carries on.
+        DispatchQueue.global(qos: .userInteractive).async {
+            guard let thumb = makeThumbnail(url) else { return }
+            DispatchQueue.main.async { [weak self] in self?.hangCapture(url, thumb: thumb) }
+        }
+    }
+
+    private func hangCapture(_ url: URL, thumb: NSImage) {
         let from = captureRect(of: url)
         if let from {
             let center = CGPoint(x: from.midX, y: from.midY)
             pendingScreen = NSScreen.screens.first { NSMouseInRect(center, $0.frame, false) }
         }
-        guard let id = line.hang(url, flying: from != nil), let from else { return }
+        guard let id = line.hang(url, thumb: thumb, flying: from != nil), let from else { return }
         // Let the line come down and lay out before measuring the landing spot.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in
             self?.fly(id, from: from)
