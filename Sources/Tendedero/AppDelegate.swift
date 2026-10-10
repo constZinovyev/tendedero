@@ -296,6 +296,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // The picture for the flight is up to the whole screen's size: read
         // in the background, so the line comes down smoothly meanwhile.
         let url = item.url, tilt = CGFloat(item.tilt)
+        // Only touched again back on the main thread.
+        nonisolated(unsafe) let flightScreen = screen
         DispatchQueue.global(qos: .userInteractive).async {
             let image = makeThumbnail(url, maxPixels: min(3000, max(400, pixels)))?
                 .cgImage(forProposedRect: nil, context: nil, hints: nil)
@@ -305,7 +307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.line.land(id)
                     return
                 }
-                CaptureFlight.fly(image: image, from: from, to: to, tilt: tilt, on: screen) { [weak self] in
+                CaptureFlight.fly(image: image, from: from, to: to, tilt: tilt, on: flightScreen) { [weak self] in
                     self?.line.land(id)
                 }
             }

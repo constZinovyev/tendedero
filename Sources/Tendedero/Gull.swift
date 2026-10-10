@@ -22,8 +22,8 @@ final class GullPictures: @unchecked Sendable {
     static let size: CGFloat = 1.3
     /// The body's middle in flight is this far above the feet.
     static let lift: CGFloat = 15 * size
-    /// Moments in one wingbeat.
-    static let phases = 12
+    /// Moments in one wingbeat: enough that the slow beat looks smooth.
+    static let phases = 16
 
     /// The heights it is seen from in flight: a little from above, about
     /// level, and from below.
@@ -272,7 +272,9 @@ final class GullPictures: @unchecked Sendable {
         nostril.move(to: CGPoint(x: 4.2 + len * 0.3, y: -0.35))
         nostril.addLine(to: CGPoint(x: 4.2 + len * 0.48, y: -0.3))
         Sprite.stroke(ctx, nostril, Sprite.rgba(120, 80, 20, 0.45), width: 0.3)
-        // The eye: a pale iris, a small pupil, a thin orange ring.
+        // The eye: a dark pupil filling most of a pale golden iris, a soft
+        // light catching it, and the upper lid just over it. A small pupil
+        // in a bright ring reads, this small, as a wild red stare.
         let eye = CGPoint(x: 1.3, y: -1.2)
         if blink {
             let lid = CGMutablePath()
@@ -280,10 +282,14 @@ final class GullPictures: @unchecked Sendable {
             lid.addQuadCurve(to: CGPoint(x: eye.x + 1, y: eye.y), control: CGPoint(x: eye.x, y: eye.y + 0.6))
             Sprite.stroke(ctx, lid, Sprite.rgba(110, 116, 124, 0.8), width: 0.4)
         } else {
-            Sprite.fill(ctx, Sprite.ellipse(eye.x, eye.y, 0.95, 0.9), Sprite.rgba(238, 224, 160, 1))
-            Sprite.stroke(ctx, Sprite.ellipse(eye.x, eye.y, 1.0, 0.95), Sprite.rgba(222, 112, 62, 0.9), width: 0.3)
-            Sprite.fill(ctx, Sprite.ellipse(eye.x + 0.08, eye.y, 0.42, 0.42), Sprite.rgba(18, 18, 20, 1))
-            Sprite.fill(ctx, Sprite.ellipse(eye.x + 0.25, eye.y - 0.25, 0.17, 0.17), Sprite.rgba(255, 255, 255, 0.95))
+            Sprite.fill(ctx, Sprite.ellipse(eye.x, eye.y, 0.9, 0.86), Sprite.rgba(214, 196, 140, 1))
+            Sprite.fill(ctx, Sprite.ellipse(eye.x + 0.06, eye.y + 0.02, 0.6, 0.6), Sprite.rgba(28, 26, 26, 1))
+            Sprite.stroke(ctx, Sprite.ellipse(eye.x, eye.y, 0.95, 0.9), Sprite.rgba(150, 156, 166, 0.55), width: 0.22)
+            let lid = CGMutablePath()
+            lid.move(to: CGPoint(x: eye.x - 1.0, y: eye.y - 0.35))
+            lid.addQuadCurve(to: CGPoint(x: eye.x + 1.0, y: eye.y - 0.4), control: CGPoint(x: eye.x, y: eye.y - 1.15))
+            Sprite.stroke(ctx, lid, Sprite.rgba(150, 158, 170, 0.6), width: 0.32)
+            Sprite.fill(ctx, Sprite.ellipse(eye.x + 0.28, eye.y - 0.24, 0.2, 0.2), Sprite.rgba(255, 255, 255, 0.95))
         }
         ctx.restoreGState()
     }
@@ -891,8 +897,6 @@ final class GullVisit: NSObject {
     private var hop: (from: CGFloat, to: CGFloat, start: CFTimeInterval)?
     /// Scratching the head with a foot.
     private var scratchUntil: CFTimeInterval = 0
-    /// Treading on the spot, the feet paddling as on wet sand.
-    private var paddleUntil: CFTimeInterval = 0
     /// Resting on one leg, the other tucked into the belly feathers.
     private var oneLeg = false
     /// Hanging in the wind in flight, almost still.
@@ -926,7 +930,8 @@ final class GullVisit: NSObject {
     private var viewChanged: CFTimeInterval = 0
     /// Standing turned towards you, until then.
     private var turnedUntil: CFTimeInterval = 0
-    private var calmPace = false
+    private enum Pace { case calm, lively, flight }
+    private var currentPace = Pace.lively
 
     /// Following the pointer, after a double-click.
     private var following = false
@@ -947,7 +952,7 @@ final class GullVisit: NSObject {
     /// Busy with something of its own, not to be interrupted by a new idea.
     private var busy: Bool {
         walkTo != nil || hop != nil || clock < preenUntil || clock < restUntil || clock < stretchUntil || clock < peckUntil
-            || clock < scratchUntil || clock < paddleUntil
+            || clock < scratchUntil
     }
 
     /// What it can stand on, looked up at most twice a second.
@@ -988,7 +993,8 @@ final class GullVisit: NSObject {
         keepLayered(now: clock, force: true)
         draw()
         let link = window.gullView.displayLink(target: self, selector: #selector(tick(_:)))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+        currentPace = .flight
         link.add(to: .main, forMode: .common)
         self.link = link
     }
@@ -1149,7 +1155,10 @@ final class GullVisit: NSObject {
     }
 
     @objc private func tick(_ link: CADisplayLink) {
-        let now = CACurrentMediaTime()
+        // Worked out for the moment the frame is shown, not the moment the
+        // callback happens to run: that varies a little from frame to frame
+        // and made the flight judder.
+        let now = link.targetTimestamp
         let dt = min(1.0 / 20, max(0.001, now - (lastTick == 0 ? now - 1.0 / 60 : lastTick)))
         lastTick = now
         clock = now
@@ -1167,13 +1176,20 @@ final class GullVisit: NSObject {
         guard !gone else { return }
         keepLayered(now: now)
         draw()
-        // Standing still it only breathes, blinks and looks about: a calmer pace will do.
-        var calm = false
-        if case .standing = mode, walkTo == nil, hop == nil, clock >= stretchUntil, clock >= scratchUntil, clock >= paddleUntil, bent == nil || abs(depthSpeed) < 2 { calm = !following }
-        if calm != calmPace {
-            calmPace = calm
-            link.preferredFrameRateRange = calm ? CAFrameRateRange(minimum: 24, maximum: 30, preferred: 30)
-                                                : CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+        // Standing still it only breathes, blinks and looks about: a calmer
+        // pace will do. Flying across the screen it moves several points a
+        // frame, so it gets the display's full rate where it has one.
+        var pace = Pace.lively
+        if case .flying = mode { pace = .flight }
+        if case .standing = mode, walkTo == nil, hop == nil, clock >= stretchUntil, clock >= scratchUntil,
+           bent == nil || abs(depthSpeed) < 2, !following { pace = .calm }
+        if pace != currentPace {
+            currentPace = pace
+            link.preferredFrameRateRange = switch pace {
+            case .calm: CAFrameRateRange(minimum: 24, maximum: 30, preferred: 30)
+            case .lively: CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+            case .flight: CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+            }
         }
     }
 
@@ -1228,7 +1244,7 @@ final class GullVisit: NSObject {
         let approaching = final && dist < 120
         if approaching { gliding = false }
         let hovering = clock < hoverUntil && !following && !final
-        let cruise: CGFloat = following ? 520 : 290
+        let cruise: CGFloat = following ? 480 : 220
         let wanted = approaching ? min(cruise, max(40, dist * 2.4)) : min(cruise, max(120, dist * 2.2))
         var want = CGVector(dx: dx / max(dist, 1) * wanted, dy: dy / max(dist, 1) * wanted)
         var turn: CGFloat = approaching ? 5 : (following ? 3.4 : 2.2)
@@ -1249,13 +1265,13 @@ final class GullVisit: NSObject {
         // Wings: beating while it climbs, slows down or has just set off;
         // otherwise a few beats and a glide, in turns.
         let speed = hypot(v.dx, v.dy)
-        let mustBeat = !hovering && (v.dy > 60 || speed < 200 || approaching || clock < flapUntil)
+        let mustBeat = !hovering && (v.dy > 60 || speed < 150 || approaching || clock < flapUntil)
         if mustBeat {
             glideUntil = 0
             nextGlide = max(nextGlide, clock + 0.6)
         } else if !gliding, clock >= nextGlide {
-            glideUntil = clock + .random(in: 0.9...2.2)
-            nextGlide = glideUntil + .random(in: 0.8...1.6)
+            glideUntil = clock + .random(in: 1.4...3.2)
+            nextGlide = glideUntil + .random(in: 0.9...1.8)
         }
         if gliding {
             if clock >= glideUntil {
@@ -1264,7 +1280,8 @@ final class GullVisit: NSObject {
                 wingPhase = Self.levelPhase
             }
         } else {
-            let rate = approaching || speed < 200 || v.dy > 60 ? 4.6 : 3.4
+            // Slow, deep beats, a little quicker when it climbs or brakes.
+            let rate = approaching || speed < 150 || v.dy > 60 ? 3.2 : 2.4
             let before = wingPhase
             wingPhase = (wingPhase + Double(dt) * rate).truncatingRemainder(dividingBy: 1)
             // Into a glide only as the wings pass level, so they do not jump.
@@ -1349,7 +1366,6 @@ final class GullVisit: NSObject {
         stretchUntil = 0
         peckUntil = 0
         scratchUntil = 0
-        paddleUntil = 0
         if let hop { p.x = hop.to }
         hop = nil
         squawks = 0
@@ -1410,10 +1426,6 @@ final class GullVisit: NSObject {
                 holdUntil = clock + 0.8
             }
             if clock > nextIdea && !busy && squawks == 0 { haveAnIdea(perch) }
-        }
-
-        if clock < paddleUntil, walkTo == nil {
-            stride += Double(dt) * 3.4
         }
 
         if let h = hop {
@@ -1577,20 +1589,13 @@ final class GullVisit: NSObject {
             headTarget = 0.1
             nextIdea = restUntil + 1
             leaveAt = max(leaveAt, restUntil + 4)
-        case ..<0.78:
+        case ..<0.80:
             // Scratches its head with a foot brought up over the wing.
             scratchUntil = clock + .random(in: 0.9...1.8)
             headBack = false
             headTarget = 0.45
             turnedUntil = 0
             nextIdea = scratchUntil + 0.8
-        case ..<0.83:
-            // Treads on the spot, looking down at its feet.
-            paddleUntil = clock + .random(in: 1.2...2.6)
-            headBack = false
-            headTarget = 0.5
-            turnedUntil = 0
-            nextIdea = paddleUntil + 0.6
         case ..<0.91:
             // Turns towards you for a while.
             turnedUntil = clock + .random(in: 3...8)
@@ -1817,7 +1822,7 @@ final class GullVisit: NSObject {
         if scratching { dy = max(dy, 1.2) }
         var nearSwing: CGFloat = turn == .turned ? 0.12 : 0, farSwing: CGFloat = turn == .turned ? -0.1 : 0
         var nearLift: CGFloat = 1, farLift: CGFloat = 1
-        if walkTo != nil || clock < paddleUntil {
+        if walkTo != nil {
             let a = CGFloat(stride * 2 * .pi)
             nearSwing += 0.36 * sin(a)
             farSwing -= 0.36 * sin(a)

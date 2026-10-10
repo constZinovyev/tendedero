@@ -48,7 +48,7 @@ final class GullVoice {
         last[kind] = url
         player.enableRate = true
         player.rate = .random(in: 0.98...1.02)
-        player.volume = kind == .flight ? 0.22 : 0.32
+        player.volume = kind == .flight ? 0.1 : 0.16
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(p) }) ?? NSScreen.main {
             let x = (p.x - screen.frame.midX) / (screen.frame.width / 2)
             player.pan = Float(max(-0.8, min(0.8, x * 0.8)))

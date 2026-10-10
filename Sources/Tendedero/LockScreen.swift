@@ -41,13 +41,13 @@ final class LockScreen {
     private static let exportQueue = DispatchQueue(label: "app.tendedero.lockscreen.export", qos: .utility)
 
     /// Shared with the screen saver, which reads `line.png` and `state.json`.
-    static var folder: URL {
+    nonisolated static var folder: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Tendedero/LockScreen", isDirectory: true)
     }
-    private static var overlayURL: URL { folder.appendingPathComponent("line.png") }
-    private static var stillURL: URL { folder.appendingPathComponent("still.png") }
-    private static var stateURL: URL { folder.appendingPathComponent("state.json") }
+    nonisolated private static var overlayURL: URL { folder.appendingPathComponent("line.png") }
+    nonisolated private static var stillURL: URL { folder.appendingPathComponent("still.png") }
+    nonisolated private static var stateURL: URL { folder.appendingPathComponent("state.json") }
     private static var backupURL: URL { folder.appendingPathComponent("wallpaper-backup.plist") }
 
     private static var wallpaperStore: URL {

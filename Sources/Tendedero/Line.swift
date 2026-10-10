@@ -404,7 +404,8 @@ final class Line: ObservableObject {
         // The cards' pictures are made side by side on every core, so the
         // line is ready sooner at launch.
         let urls = paths.map { URL(fileURLWithPath: $0) }
-        let thumbs = UnsafeMutableBufferPointer<NSImage?>.allocate(capacity: urls.count)
+        // Each task writes only its own slot.
+        nonisolated(unsafe) let thumbs = UnsafeMutableBufferPointer<NSImage?>.allocate(capacity: urls.count)
         thumbs.initialize(repeating: nil)
         defer { _ = thumbs.deinitialize(); thumbs.deallocate() }
         DispatchQueue.concurrentPerform(iterations: urls.count) { i in thumbs[i] = makeThumbnail(urls[i]) }
