@@ -590,9 +590,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// mouse while the cursor is over a photo. Everywhere else, clicks go to
     /// whatever is underneath.
     private func updateMousePassThrough(_ mouse: NSPoint) {
-        // While a button is held the panel stays as it is, so a click
-        // or a double click is never cut in half when a photo is redrawn.
-        guard !GrabView.isDragging, line.slidingID == nil, NSEvent.pressedMouseButtons == 0 else { return }
+        guard !GrabView.isDragging, line.slidingID == nil else { return }
         let local = panel.convertPoint(fromScreen: mouse)
         let flipped = CGPoint(x: local.x, y: panel.frame.height - local.y)
         let hovered = line.photo(at: flipped, slack: 4)

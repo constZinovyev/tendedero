@@ -218,18 +218,6 @@ final class SwayView: NSView {
 
     // MARK: Where the card is
 
-    /// AppKit finds the view under a click by the frames, which stay put
-    /// while Core Animation swings the photo. The point is turned back to
-    /// where it falls on the photo at rest, so a click lands on the photo
-    /// as it is drawn.
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        guard let superview else { return super.hitTest(point) }
-        let local = convert(point, from: superview)
-        let q = line.sway(id).atRest(CGPoint(x: local.x, y: bounds.height - local.y),
-                                     pin: CGPoint(x: bounds.midX, y: 0))
-        return super.hitTest(convert(NSPoint(x: q.x, y: bounds.height - q.y), to: superview))
-    }
-
     private func cardMoved(_ rects: [UUID: CGRect]) {
         cardRect = rects[id]
         report()
