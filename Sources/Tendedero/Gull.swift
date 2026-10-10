@@ -873,17 +873,27 @@ final class Seagulls {
         return Perch(kind: .rope, points: pts, margin: 50, avoid: pegs)
     }
 
-    /// How far a hand pulling the rope has it below its rest at screen
-    /// `x`, now: a gull on it goes up and down with it.
-    func handDrop(_ kind: Perch.Kind, atX x: CGFloat) -> CGFloat {
-        guard kind == .rope, let panel = linePanel() else { return 0 }
-        let r = line.rope, w = panel.frame.width
-        guard r.pullDepth != 0 else { return 0 }
-        return RopeBend.drop(at: x - panel.frame.minX, load: r.pullX, depth: r.pullDepth, width: w)
+    /// How far a hand pulling the rope or a garland has it below its rest
+    /// at screen `x`, now: a gull on it goes up and down with it.
+    func handDrop(_ perch: Perch, atX x: CGFloat) -> CGFloat {
+        switch perch.kind {
+        case .rope:
+            guard let panel = linePanel() else { return 0 }
+            let r = line.rope, w = panel.frame.width
+            guard r.pullDepth != 0 else { return 0 }
+            return RopeBend.drop(at: x - panel.frame.minX, load: r.pullX, depth: r.pullDepth, width: w)
+        case .garland(let id):
+            return decorations.handDrop(id, at: CGPoint(x: x, y: perch.y(at: x)))
+        }
     }
 
-    /// The rope is in a hand, or still bouncing from one.
-    var ropeInHand: Bool { line.ropeHeld || line.rope.pullDepth != 0 }
+    /// The rope or the garland is in a hand, or still bouncing from one.
+    func inHand(_ kind: Perch.Kind) -> Bool {
+        switch kind {
+        case .rope: line.ropeHeld || line.rope.pullDepth != 0
+        case .garland(let id): decorations.inHand(id)
+        }
+    }
 
     /// A gull's weight pulls a perch down: `depth` points at `p`.
     func bend(_ kind: Perch.Kind, at p: CGPoint, depth: CGFloat) {
@@ -1331,7 +1341,9 @@ final class GullVisit: NSObject {
         var pace = Pace.lively
         if case .flying = mode { pace = .flight }
         if case .standing = mode, walkTo == nil, hop == nil, clock >= stretchUntil, clock >= scratchUntil,
-           bent == nil || abs(depthSpeed) < 2, !following { pace = .calm }
+           bent == nil || abs(depthSpeed) < 2, !following, !(perch.map { world.inHand($0.kind) } ?? false) {
+            pace = .calm
+        }
         if pace != currentPace {
             currentPace = pace
             link.preferredFrameRateRange = switch pace {
@@ -1392,7 +1404,7 @@ final class GullVisit: NSObject {
             forFish = true
         } else if let landing {
             let y = landing.perch.y(at: landing.x) - (bent?.kind == landing.perch.kind ? depth : 0)
-                - world.handDrop(landing.perch.kind, atX: landing.x)
+                - world.handDrop(landing.perch, atX: landing.x)
             target = CGPoint(x: landing.x, y: y + GullPictures.lift)
             final = true
         } else {
@@ -1509,7 +1521,7 @@ final class GullVisit: NSObject {
     private func touchDown() {
         guard let landing else { return }
         let x = landing.x
-        let y = landing.perch.y(at: x) - world.handDrop(landing.perch.kind, atX: x)
+        let y = landing.perch.y(at: x) - world.handDrop(landing.perch, atX: x)
         let impact = min(1.4, max(0.4, hypot(v.dx, v.dy) / 90))
         perch = landing.perch
         self.landing = nil
@@ -1601,8 +1613,8 @@ final class GullVisit: NSObject {
         } else {
             // The pointer rushing at it frightens it off; only a slow,
             // careful hand gets close.
-            // The hand on the rope is not a threat: it rides it out.
-            let riding = perch.kind == .rope && world.ropeInHand
+            // The hand on its rope or garland is not a threat: it rides it out.
+            let riding = world.inHand(perch.kind)
             if !riding, (pointerNear < 120 && pointerSpeed > 450) || (pointerNear < 60 && pointerSpeed > 220) {
                 startle(from: m)
                 return
@@ -1651,7 +1663,7 @@ final class GullVisit: NSObject {
         }
         // Feet on the rope as it is now: under its own weight and under a
         // hand pulling it, so it rides every swing.
-        let y = perch.y(at: p.x) - (bent?.kind == perch.kind ? depth : 0) - world.handDrop(perch.kind, atX: p.x)
+        let y = perch.y(at: p.x) - (bent?.kind == perch.kind ? depth : 0) - world.handDrop(perch, atX: p.x)
         let rideSpeed = (y - p.y) / max(dt, 0.001)
         p.y = y
         // Jerked about hard, it opens its wings a moment to keep its balance.

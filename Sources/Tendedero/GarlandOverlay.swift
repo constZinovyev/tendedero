@@ -235,6 +235,17 @@ final class GarlandController {
         windows[.garland(id)]?.decorView.bend(at: p, depth: depth)
     }
 
+    /// How far a hand pulling a garland's wire has it below its rest at
+    /// `p` (screen coordinates, on the wire), now.
+    func handDrop(_ id: UUID, at p: CGPoint) -> CGFloat {
+        windows[.garland(id)]?.decorView.handDrop(at: p) ?? 0
+    }
+
+    /// A garland's wire is in a hand, or still bouncing from one.
+    func inHand(_ id: UUID) -> Bool {
+        windows[.garland(id)]?.decorView.inHand ?? false
+    }
+
     func toggleEditing() {
         store.editing.toggle()
     }
@@ -657,6 +668,13 @@ final class DecorView: NSView {
         guard let window else { return }
         garlandLayers.bend(at: CGPoint(x: p.x - window.frame.minX, y: p.y - window.frame.minY), depth: depth)
     }
+
+    func handDrop(at p: CGPoint) -> CGFloat {
+        guard let window else { return 0 }
+        return garlandLayers.handDrop(at: CGPoint(x: p.x - window.frame.minX, y: p.y - window.frame.minY))
+    }
+
+    var inHand: Bool { pulling || garlandLayers.inHand }
 
     /// The pointer moving past the candles stirs the air around them.
     func feelAir(at p: CGPoint, velocity: CGVector) {

@@ -315,6 +315,16 @@ final class GarlandLayers {
         applyLoads()
     }
 
+    /// How far a hand pulling the wire has it below its rest at `p` (this
+    /// layer's coordinates, on the wire), now: a bird on it rides it.
+    func handDrop(at p: CGPoint) -> CGFloat {
+        guard let wire, handLoad.depth != 0 else { return 0 }
+        return drop(along: wire.lengths[nearest(to: p, on: wire)], wire: wire, load: handLoad)
+    }
+
+    /// The wire is in a hand, or still bouncing from one.
+    var inHand: Bool { handLoad.depth != 0 || bounce != nil }
+
     /// Let go, the wire springs back past its rest and bounces up and down
     /// a few times, and the bulbs on it swing as it shakes them. Driven
     /// frame by frame only while it bounces.
