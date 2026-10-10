@@ -946,14 +946,8 @@ final class GullVisit: NSObject {
         v = CGVector(dx: facing * 260, dy: -20)
         clock = CACurrentMediaTime()
         plan(arriving: true)
-        if let line = world.lineWindow, line.isVisible {
-            window.level = line.level
-            window.orderFrontRegardless()
-            window.order(.above, relativeTo: line.windowNumber)
-        } else {
-            window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 2)
-            window.orderFrontRegardless()
-        }
+        window.orderFrontRegardless()
+        keepLayered(now: clock, force: true)
         draw()
         let link = window.gullView.displayLink(target: self, selector: #selector(tick(_:)))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
@@ -1052,6 +1046,52 @@ final class GullVisit: NSObject {
 
     // MARK: Each frame
 
+    // MARK: In front or behind
+
+    private var layeredAt: CFTimeInterval = 0
+    private static let desktopLevel = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 2)
+
+    /// In front of the photos while it flies and while it stands on the
+    /// line or on a garland. Where a window covers the garland it stands on,
+    /// it goes behind that window with the garland. With the line put away
+    /// it keeps to the desktop, behind the windows. Looked at a few times a
+    /// second: the windows above are only asked about while on a garland.
+    private func keepLayered(now: CFTimeInterval, force: Bool = false) {
+        guard force || now - layeredAt > 0.25 else { return }
+        layeredAt = now
+        guard let line = world.lineWindow, line.isVisible else {
+            if window.level != Self.desktopLevel { window.level = Self.desktopLevel }
+            return
+        }
+        var front = true
+        if case .garland? = perch?.kind, line.level > Self.desktopLevel, windowCovers(p) { front = false }
+        let level = front ? line.level : Self.desktopLevel
+        if window.level != level { window.level = level }
+        // Same level as the line: it has to be ordered above it, and the
+        // line may have been brought forward since.
+        if front, window.level == line.level, window.orderedIndex > line.orderedIndex {
+            window.order(.above, relativeTo: line.windowNumber)
+        }
+    }
+
+    /// Whether an ordinary window of another app covers this point, in
+    /// AppKit screen coordinates.
+    private func windowCovers(_ point: CGPoint) -> Bool {
+        guard let top = NSScreen.screens.first?.frame.maxY,
+              let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]] else { return false }
+        let at = CGPoint(x: point.x, y: top - point.y)
+        let me = ProcessInfo.processInfo.processIdentifier
+        return list.contains { info in
+            guard info[kCGWindowLayer as String] as? Int == 0,
+                  info[kCGWindowOwnerPID as String] as? Int32 != me,
+                  (info[kCGWindowAlpha as String] as? Double ?? 1) > 0.01,
+                  let b = info[kCGWindowBounds as String] as? [String: CGFloat],
+                  let rect = CGRect(dictionaryRepresentation: b as CFDictionary) else { return false }
+            return rect.contains(at)
+        }
+    }
+
     @objc private func tick(_ link: CADisplayLink) {
         let now = CACurrentMediaTime()
         let dt = min(1.0 / 20, max(0.001, now - (lastTick == 0 ? now - 1.0 / 60 : lastTick)))
@@ -1069,6 +1109,7 @@ final class GullVisit: NSObject {
         }
         swingPerch(dt: CGFloat(dt))
         guard !gone else { return }
+        keepLayered(now: now)
         draw()
         // Standing still it only breathes, blinks and looks about: a calmer pace will do.
         var calm = false
