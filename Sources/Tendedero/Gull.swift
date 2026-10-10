@@ -74,6 +74,9 @@ final class GullPictures: @unchecked Sendable {
     let head: [Turn: [Bill: Picture]]
     let nearLeg: Picture
     let farLeg: Picture
+    /// In flight, the lower half of the bill dropped open, a little and
+    /// wide, laid over a flight picture (same rect).
+    let flightBillOpen: [Picture]
 
     @MainActor private static var cache: [CGFloat: GullPictures] = [:]
     @MainActor private static var waiting: [CGFloat: [(GullPictures) -> Void]] = [:]
@@ -145,6 +148,9 @@ final class GullPictures: @unchecked Sendable {
         self.head = head
         let legRect = CGRect(x: -3, y: -1, width: 9, height: 13).scaled(k)
         nearLeg = draw(legRect) { Self.leg($0, length: 10.2, color: Self.leg) }
+        flightBillOpen = [0.3, 0.6].map { open in
+            draw(flightRect, shadow: false) { Self.openLowerBill($0, CGAffineTransform(translationX: 10.6, y: -4.6).scaledBy(x: 0.95, y: 0.95), open: open) }
+        }
         farLeg = draw(legRect) { Self.leg($0, length: 10.6, color: Self.legShade) }
     }
 
@@ -291,6 +297,37 @@ final class GullPictures: @unchecked Sendable {
             Sprite.stroke(ctx, lid, Sprite.rgba(150, 158, 170, 0.6), width: 0.32)
             Sprite.fill(ctx, Sprite.ellipse(eye.x + 0.28, eye.y - 0.24, 0.2, 0.2), Sprite.rgba(255, 255, 255, 0.95))
         }
+        ctx.restoreGState()
+    }
+
+    /// The lower mandible turned open by `open` about the gape, with the
+    /// inside of the mouth showing, over a head drawn with the bill shut.
+    private static func openLowerBill(_ ctx: CGContext, _ t: CGAffineTransform, open: CGFloat) {
+        ctx.saveGState()
+        ctx.concatenate(t)
+        let len: CGFloat = 8.2
+        // The mouth: a dark red wedge between the two halves.
+        let mouth = CGMutablePath()
+        mouth.move(to: CGPoint(x: 4.0, y: 0.9))
+        mouth.addLine(to: CGPoint(x: 4.2 + len * 0.8, y: 0.9))
+        mouth.addLine(to: CGPoint(x: 4.2 + cos(open) * len * 0.8, y: 1.0 + sin(open) * len * 0.8))
+        mouth.closeSubpath()
+        Sprite.fill(ctx, mouth, Sprite.rgba(150, 52, 44, 1))
+        ctx.translateBy(x: 4.2, y: 1.0)
+        ctx.rotate(by: open)
+        let lower = CGMutablePath()
+        lower.move(to: CGPoint(x: 0, y: -0.2))
+        lower.addLine(to: CGPoint(x: len - 1.0, y: -0.25))
+        lower.addQuadCurve(to: CGPoint(x: len * 0.68, y: 1.25), control: CGPoint(x: len - 1.4, y: 1.15))
+        lower.addQuadCurve(to: CGPoint(x: 0, y: 1.0), control: CGPoint(x: len * 0.3, y: 0.95))
+        lower.closeSubpath()
+        Sprite.clipped(ctx, lower) {
+            Sprite.linear(ctx, from: .zero, to: CGPoint(x: len, y: 0), [(0, billBase), (1, billTip)])
+            Sprite.fill(ctx, Sprite.ellipse(len * 0.7, 0.55, 1.2, 0.75), gonys)
+            Sprite.linear(ctx, from: CGPoint(x: 0, y: -0.3), to: CGPoint(x: 0, y: 1.3),
+                          [(0, Sprite.rgba(255, 255, 255, 0)), (1, Sprite.rgba(150, 100, 20, 0.35))])
+        }
+        Sprite.stroke(ctx, lower, Sprite.rgba(120, 80, 20, 0.5), width: 0.3)
         ctx.restoreGState()
     }
 
@@ -905,7 +942,8 @@ final class GullVisit: NSObject {
     private var tossAt: CFTimeInterval = 0
     private var tossFrom: CGPoint?
     private let tossedFish = CALayer()
-    private static let tossTime = 0.62
+    private let billOpen = CALayer()
+    private static let tossTime = 0.9
     /// In the air between the throw and the catch.
     private var tossing: Bool { tossAt > 0 && clock >= tossAt && clock < tossAt + Self.tossTime }
     /// Where the bill tip is, in screen coordinates.
@@ -1038,6 +1076,9 @@ final class GullVisit: NSObject {
         fishInBill.anchorPoint = CGPoint(x: -fish.rect.minX / fish.rect.width, y: (fish.rect.maxY - fish.length * 0.55) / fish.rect.height)
         fishInBill.isHidden = true
         bird.addSublayer(fishInBill)
+        billOpen.contentsScale = screen.backingScaleFactor
+        billOpen.isHidden = true
+        bird.addSublayer(billOpen)
         tossedFish.contents = fish.image
         tossedFish.contentsScale = screen.backingScaleFactor
         tossedFish.bounds = fishInBill.bounds
@@ -1444,17 +1485,17 @@ final class GullVisit: NSObject {
     /// around swing, and the gull climbs away with it, swallowing it soon.
     private func snatch() {
         guard let fish = fishTarget else { return }
+        let spotOfSnatch = fishSpots.first { $0.id == fish.id && $0.index == fish.index }?.point ?? billTip
         fishTarget = nil
         if world.snatchFish(fish.id, fish.index) {
-            // A moment in the bill, then up it goes, and is caught again.
-            tossAt = clock + 0.3
-            tossFrom = nil
+            // Flicked up straight off the garland, high, and caught again.
+            tossAt = clock
+            tossFrom = spotOfSnatch
             carryUntil = tossAt + Self.tossTime + .random(in: 1.4...2.2)
-            let bill = CGPoint(x: p.x + facing * 22 * k, y: p.y + 5 * k)
-            world.air(at: bill, velocity: CGVector(dx: facing * 500, dy: 400))
+            world.air(at: billTip, velocity: CGVector(dx: facing * 500, dy: 400))
         }
         flapUntil = clock + 1.0
-        v = CGVector(dx: facing * 110, dy: 170)
+        v = CGVector(dx: facing * 40, dy: 60)
         plan(arriving: false)
     }
 
@@ -1964,6 +2005,27 @@ final class GullVisit: NSObject {
             carryUntil = 0
             if Bool.random() { world.voice.play(.call, at: p) }
         }
+        // Tossing: the whole bird looks after the fish, head up as it
+        // rises, down as it falls, the bill open as it throws and again as
+        // it catches.
+        var open = -1
+        if tossing, let flight {
+            let u = (clock - tossAt) / Self.tossTime
+            let fishY = tossedFish.position.y + window.frame.origin.y
+            let fishX = tossedFish.position.x + window.frame.origin.x
+            let look = atan2(fishY - billTip.y, max(abs(fishX - billTip.x), 30 * k))
+            pitch = max(-0.3, min(0.55, look * 0.7))
+            if u < 0.12 { pitch = 0.5; open = 1 } else if u > 0.7 { open = u > 0.85 ? 1 : 0 }
+            _ = flight
+        } else if clock - tossAt < Self.tossTime + 0.08, tossAt > 0 {
+            open = 0
+        }
+        billOpen.isHidden = open < 0 || flight == nil
+        if open >= 0, let r = flight?.rect {
+            let pic = pictures.flightBillOpen[open]
+            if billOpen.contents as AnyObject? !== pic.image as AnyObject? { billOpen.contents = pic.image }
+            billOpen.frame = CGRect(origin: .zero, size: r.size)
+        }
         if let flight {
             place(bird, flight, at: Sprite.snap(CGPoint(x: at.x - origin.x, y: at.y - origin.y), scale: scale))
             bird.transform = CATransform3DScale(CATransform3DMakeRotation(pitch * facing, 0, 0, 1), facing, 1, 1)
@@ -1989,15 +2051,16 @@ final class GullVisit: NSObject {
         let u = CGFloat((clock - tossAt) / Self.tossTime)
         let to = billTip
         // Up and over, landing where the bill is now.
-        let height = 46 * k
+        let height = 90 * k
         let x = from.x + (to.x - from.x) * u
         let y = from.y + (to.y - from.y) * u + height * 4 * u * (1 - u)
         let origin = window.frame.origin
         tossedFish.isHidden = false
         tossedFish.position = CGPoint(x: x - origin.x, y: y - origin.y)
-        // One and a half turns, ending as it lies in the bill.
+        // From hanging head down, a full turn and over, ending as it lies
+        // in the bill.
         let held = CGFloat.pi / 2 - 0.35
-        let spin = held + 3 * .pi * (1 - u)
+        let spin = (held + 2 * .pi) * u
         tossedFish.transform = CATransform3DRotate(CATransform3DMakeScale(facing, 1, 1), spin, 0, 0, 1)
     }
 
