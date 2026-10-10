@@ -12,8 +12,8 @@ import SwiftUI
 /// Dragged sideways, the photo slides along the line to any spot instead.
 /// Pulling it down off the line turns the slide into a drag out.
 ///
-/// A click brings it to the front, a double click shows it large, press and
-/// hold opens Markup, the corner cross discards, Copy is in its menu.
+/// A click, single or double, brings it to the front; press and hold opens
+/// Markup, the corner cross discards; Show and Copy are in its menu.
 /// Whatever you click or slide comes to the front.
 struct GrabArea: NSViewRepresentable {
     let item: Pegged
@@ -35,7 +35,6 @@ struct GrabArea: NSViewRepresentable {
         view.url = item.url
         view.dragImage = item.thumb
         view.onClick = { line.bringToFront(id) }
-        view.onDoubleClick = { line.show(id) }
         view.onSlideStart = { line.beginSlide(id) }
         view.onSlide = { dx in line.slide(id, by: dx) }
         view.onSlideEnd = { line.endSlide() }
@@ -82,7 +81,6 @@ final class GrabView: NSView, NSDraggingSource {
     var url: URL?
     var dragImage: NSImage?
     var onClick: () -> Void = {}
-    var onDoubleClick: () -> Void = {}
     var onSlideStart: () -> Void = {}
     var onSlide: (CGFloat) -> Void = { _ in }
     var onSlideEnd: () -> Void = {}
@@ -98,8 +96,6 @@ final class GrabView: NSView, NSDraggingSource {
     private var startedDrag = false
     private var sliding = false
     private var holdTimer: Timer?
-    /// A single click waits to be sure it is not the first of a double.
-    private var clickTimer: Timer?
     private var didLongPress = false
 
     /// How long you hold before Markup opens. Long enough not to fire on a
@@ -127,13 +123,6 @@ final class GrabView: NSView, NSDraggingSource {
         if isInCross(event) {
             downPoint = nil
             onDiscard()
-            return
-        }
-        if event.clickCount == 2 {
-            clickTimer?.invalidate()
-            clickTimer = nil
-            downPoint = nil
-            onDoubleClick()
             return
         }
         downPoint = event.locationInWindow
@@ -205,21 +194,7 @@ final class GrabView: NSView, NSDraggingSource {
             onSlideEnd()
             return
         }
-        if downPoint != nil && !startedDrag && !didLongPress && event.clickCount == 1 {
-            // Bringing the photo to the front reorders the line, and SwiftUI
-            // rebuilds its view; done between the two clicks of a double
-            // click, the second one could miss it. So it waits until no
-            // second click can come.
-            clickTimer?.invalidate()
-            let timer = Timer(timeInterval: NSEvent.doubleClickInterval, repeats: false) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    self?.clickTimer = nil
-                    self?.onClick()
-                }
-            }
-            RunLoop.main.add(timer, forMode: .common)
-            clickTimer = timer
-        }
+        if downPoint != nil && !startedDrag && !didLongPress { onClick() }
         downPoint = nil
         didLongPress = false
     }
