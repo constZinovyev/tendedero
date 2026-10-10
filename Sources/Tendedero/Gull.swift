@@ -899,6 +899,17 @@ final class GullVisit: NSObject {
     /// Carrying a fish in its bill until then, then it is swallowed.
     private var carryUntil: CFTimeInterval = 0
     private let fishInBill = CALayer()
+    /// The fish thrown up out of the bill to be caught again head first:
+    /// when it is thrown, from where (screen coordinates), and how long it
+    /// is in the air.
+    private var tossAt: CFTimeInterval = 0
+    private var tossFrom: CGPoint?
+    private let tossedFish = CALayer()
+    private static let tossTime = 0.62
+    /// In the air between the throw and the catch.
+    private var tossing: Bool { tossAt > 0 && clock >= tossAt && clock < tossAt + Self.tossTime }
+    /// Where the bill tip is, in screen coordinates.
+    private var billTip: CGPoint { CGPoint(x: p.x + facing * 21 * k, y: p.y + 4.6 * k) }
     /// The fish on its screen, looked up a few times a second.
     private var fishCache: (spots: [(id: UUID, index: Int, point: CGPoint)], at: CFTimeInterval)?
     private var fishSpots: [(id: UUID, index: Int, point: CGPoint)] {
@@ -1027,6 +1038,12 @@ final class GullVisit: NSObject {
         fishInBill.anchorPoint = CGPoint(x: -fish.rect.minX / fish.rect.width, y: (fish.rect.maxY - fish.length * 0.55) / fish.rect.height)
         fishInBill.isHidden = true
         bird.addSublayer(fishInBill)
+        tossedFish.contents = fish.image
+        tossedFish.contentsScale = screen.backingScaleFactor
+        tossedFish.bounds = fishInBill.bounds
+        tossedFish.anchorPoint = fishInBill.anchorPoint
+        tossedFish.isHidden = true
+        window.gullView.layer?.addSublayer(tossedFish)
     }
 
     func start() {
@@ -1340,12 +1357,18 @@ final class GullVisit: NSObject {
         let dist = hypot(dx, dy)
         let approaching = final && dist < 120
         if approaching { gliding = false }
-        let hovering = clock < hoverUntil && !following && !final
+        let hovering = clock < hoverUntil && !following && !final && !tossing
         let cruise: CGFloat = following ? 480 : 220
         let wanted = approaching ? min(cruise, max(40, dist * 2.4)) : min(cruise, max(120, dist * 2.2))
         var want = CGVector(dx: dx / max(dist, 1) * wanted, dy: dy / max(dist, 1) * wanted)
         var turn: CGFloat = approaching ? 5 : (following ? 3.4 : 2.2)
-        if hovering {
+        if tossing {
+            // Watching the fish: almost still in the air, beating to hold
+            // there, a little forward and up under it.
+            want = CGVector(dx: facing * 50, dy: 25)
+            turn = 4
+            flapUntil = max(flapUntil, clock + 0.3)
+        } else if hovering {
             // Hanging in the wind: wings out, drifting a little and rising
             // and sinking on the gusts.
             want = CGVector(dx: facing * 10, dy: CGFloat(sin(clock * 2.1)) * 16)
@@ -1399,6 +1422,9 @@ final class GullVisit: NSObject {
             if screen.frame.contains(p), Double.random(in: 0..<1) < 0.45 { world.voice.play(.flight, at: p) }
         }
 
+        // Nothing else until the fish is caught.
+        if tossing { return }
+
         if route.first != nil, dist < 36 {
             route.removeFirst()
             // Sometimes it stops for a moment, hanging in the wind.
@@ -1420,7 +1446,10 @@ final class GullVisit: NSObject {
         guard let fish = fishTarget else { return }
         fishTarget = nil
         if world.snatchFish(fish.id, fish.index) {
-            carryUntil = clock + .random(in: 1.4...2.4)
+            // A moment in the bill, then up it goes, and is caught again.
+            tossAt = clock + 0.3
+            tossFrom = nil
+            carryUntil = tossAt + Self.tossTime + .random(in: 1.4...2.2)
             let bill = CGPoint(x: p.x + facing * 22 * k, y: p.y + 5 * k)
             world.air(at: bill, velocity: CGVector(dx: facing * 500, dy: 400))
         }
@@ -1920,7 +1949,8 @@ final class GullVisit: NSObject {
         stander.isHidden = flight != nil
         // The fish in its bill, wriggling a little, until it is swallowed.
         let carrying = clock < carryUntil && flight != nil
-        fishInBill.isHidden = !carrying
+        fishInBill.isHidden = !carrying || tossing
+        drawToss()
         if carrying, let r = flight?.rect {
             // The bill tip in the flight pictures, y down from the body's middle.
             let tip = CGPoint(x: 21 * k, y: -4.6 * k)
@@ -1940,6 +1970,35 @@ final class GullVisit: NSObject {
             return
         }
         drawStanding(at: CGPoint(x: p.x - origin.x, y: p.y - origin.y))
+    }
+
+    /// The fish in the air: thrown up from the bill, turning over, and
+    /// coming down into the bill again wherever the bird is by then.
+    private func drawToss() {
+        guard tossing else {
+            if !tossedFish.isHidden {
+                tossedFish.isHidden = true
+                tossAt = 0
+                // Caught.
+                world.air(at: billTip, velocity: CGVector(dx: facing * 200, dy: 260))
+            }
+            return
+        }
+        let from = tossFrom ?? billTip
+        tossFrom = from
+        let u = CGFloat((clock - tossAt) / Self.tossTime)
+        let to = billTip
+        // Up and over, landing where the bill is now.
+        let height = 46 * k
+        let x = from.x + (to.x - from.x) * u
+        let y = from.y + (to.y - from.y) * u + height * 4 * u * (1 - u)
+        let origin = window.frame.origin
+        tossedFish.isHidden = false
+        tossedFish.position = CGPoint(x: x - origin.x, y: y - origin.y)
+        // One and a half turns, ending as it lies in the bill.
+        let held = CGFloat.pi / 2 - 0.35
+        let spin = held + 3 * .pi * (1 - u)
+        tossedFish.transform = CATransform3DRotate(CATransform3DMakeScale(facing, 1, 1), spin, 0, 0, 1)
     }
 
     /// The standing bird in its parts: it breathes, crouches, shakes, steps
