@@ -591,26 +591,26 @@ final class CandleLayers {
         guard flickerAmount > 0.01, !winds.isEmpty, root.superlayer?.speed != 0 else { return }
         let speed = hypot(v.dx, v.dy)
         guard speed > 30 else { return }
-        let reach = unit * 14
+        let reach = unit * 18
         let now = CACurrentMediaTime()
         for (i, wind) in winds.enumerated() where i < parts.count {
             // The flame and its glow sit above the wick.
             let d = hypot(p.x - wind.base.x, p.y - (wind.base.y + unit * 0.8))
             guard d < reach else { continue }
-            // At most 15 new curves a second, however fast the mouse reports:
+            // At most 20 new curves a second, however fast the mouse reports:
             // smothering builds up by time, and the curves stay detailed.
-            guard now - max(wind.leanStart, wind.dipStart) >= 1.0 / 15 else { continue }
-            let near = pow(1 - d / reach, 1.6)
-            let strength = min(1.2, Double(speed) / 800) * Double(near)
-            guard strength > 0.03 else { continue }
+            guard now - max(wind.leanStart, wind.dipStart) >= 1.0 / 20 else { continue }
+            let near = pow(1 - d / reach, 1.3)
+            let strength = min(1.3, Double(speed) / 560) * Double(near)
+            guard strength > 0.02 else { continue }
             var rnd = SeededRandom(seed: Int(now * 1000) &+ i)
 
             // Lean: air moving right pushes the tip right, a clockwise turn,
             // which is negative with y up. Mostly sideways air leans it most.
             let sideways = Double(v.dx / max(speed, 1))
             let lean = wind.currentLean
-            let target = max(-0.65, min(0.65, lean - sideways * 0.6 * strength))
-            if abs(target - lean) > 0.04 || abs(lean) < 0.02 {
+            let target = max(-0.75, min(0.75, lean - sideways * 0.85 * strength))
+            if abs(target - lean) > 0.03 || abs(lean) < 0.02 {
                 let curve = Self.leanCurve(from: lean, to: target, rough: strength, random: &rnd)
                 winds[i].lean = curve
                 winds[i].leanStart = now
@@ -621,7 +621,7 @@ final class CandleLayers {
             // about one and a half to two seconds of fast waving bring the
             // flame near out. Slower air only bends it. It fades on its own.
             let fast = max(0, strength - 0.35)
-            let smothered = min(1, wind.currentDip + fast * (1.0 / 15) * 0.9)
+            let smothered = min(1, wind.currentDip + fast * (1.0 / 20) * 0.9)
             if smothered > wind.currentDip + 0.005 {
                 let curve = Self.dipCurve(from: wind.currentDip, to: smothered)
                 winds[i].dip = curve
@@ -645,14 +645,14 @@ final class CandleLayers {
             let t = Double(i) / 3
             return a + (b - a) * (1 - (1 - t) * (1 - t))
         }
-        let k = 22.0, c = 2.6
+        let k = 26.0, c = 2.4
         let wd = (k - c * c / 4).squareRoot(), decay = c / 2
         let n = Int(2.6 / step)
         let back = (1...n).map { i -> Double in
             let t = Double(i) * step
             let swing = b * exp(-decay * t) * (cos(wd * t) + decay / wd * sin(wd * t))
             // Rough air: a quick tremble that dies away in half a second.
-            let tremble = (r.next() * 2 - 1) * 0.12 * min(1, rough) * exp(-t * 5)
+            let tremble = (r.next() * 2 - 1) * 0.16 * min(1, rough) * exp(-t * 4)
             return swing + tremble
         }
         return out + back + [0]

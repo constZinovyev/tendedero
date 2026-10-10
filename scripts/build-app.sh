@@ -65,6 +65,9 @@ if [ ! -f "$ICON_CACHE" ]; then
 fi
 cp "$ICON_CACHE" "$APP/Contents/Resources/Tendedero.icns"
 
+# The seagull's voice: short clips of real gull calls (see Resources/Gull/SOURCES.md).
+if [ -d Resources/Gull ]; then cp -R Resources/Gull "$APP/Contents/Resources/Gull"; fi
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
