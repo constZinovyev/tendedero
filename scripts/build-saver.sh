@@ -31,10 +31,19 @@ PLIST
 codesign --force --sign - "$SAVER" >/dev/null
 
 if [ "${1:-}" = "--install" ]; then
+  # The same saver as last time: nothing to install, and the engine keeps
+  # running.
+  STAMP="build/.saver-installed"
+  SUM="$(cat "$LIB" "$SAVER/Contents/Info.plist" | shasum | cut -c1-40)"
+  if [ -d "$HOME/Library/Screen Savers/Tendedero.saver" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$SUM" ]; then
+    echo "Screen saver unchanged"
+    exit 0
+  fi
   mkdir -p "$HOME/Library/Screen Savers"
   rm -rf "$HOME/Library/Screen Savers/Tendedero.saver"
   cp -R "$SAVER" "$HOME/Library/Screen Savers/"
   # The engine keeps an old copy loaded until it restarts.
   killall legacyScreenSaver 2>/dev/null || true
+  echo "$SUM" > "$STAMP"
   echo "Installed in ~/Library/Screen Savers"
 fi
