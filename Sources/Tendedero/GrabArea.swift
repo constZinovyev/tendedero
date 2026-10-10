@@ -117,7 +117,12 @@ final class GrabView: NSView, NSDraggingSource {
     static let crossHitSize: CGFloat = 26
 
     private func isInCross(_ event: NSEvent) -> Bool {
-        let p = convert(event.locationInWindow, from: nil)
+        // Where the click falls on the photo as it hangs at rest: a photo
+        // swinging in the pointer's air has its cross a little aside.
+        var swaying: NSView? = superview
+        while let v = swaying, !(v is SwayView) { swaying = v.superview }
+        let atRest = (swaying as? SwayView)?.atRest(windowPoint: event.locationInWindow) ?? event.locationInWindow
+        let p = convert(atRest, from: nil)
         let corner = NSRect(x: 0, y: isFlipped ? 0 : bounds.height - Self.crossHitSize,
                             width: Self.crossHitSize, height: Self.crossHitSize)
         return corner.contains(p)

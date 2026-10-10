@@ -82,18 +82,8 @@ final class CaptureFlight {
         self.from = from
         self.to = to
         self.tilt = tilt
-        window = NSPanel(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel],
-                         backing: .buffered, defer: false)
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = false
-        window.ignoresMouseEvents = true
-        window.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
-
-        let host = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
-        host.wantsLayer = true
-        window.contentView = host
+        window = Self.takeWindow(for: screen)
+        let host = window.contentView!
         let scale = screen.backingScaleFactor
 
         container.anchorPoint = CGPoint(x: 0.5, y: 1)   // the card's top center
@@ -131,6 +121,42 @@ final class CaptureFlight {
         host.layer?.addSublayer(container)
     }
 
+    /// Windows of finished flights, kept for the next ones: making a window
+    /// over the whole screen held up the start of every fall.
+    private static var spare: [NSWindow] = []
+
+    private static func takeWindow(for screen: NSScreen) -> NSWindow {
+        if let i = spare.firstIndex(where: { $0.frame == screen.frame }) {
+            let window = spare.remove(at: i)
+            window.alphaValue = 1
+            return window
+        }
+        let window = NSPanel(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel],
+                             backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.ignoresMouseEvents = true
+        window.isReleasedWhenClosed = false
+        window.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        let host = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
+        host.wantsLayer = true
+        window.contentView = host
+        return window
+    }
+
+    /// Made ahead of time, so even the first fall starts at once.
+    static func prepare(on screen: NSScreen) {
+        if !spare.contains(where: { $0.frame == screen.frame }) { spare.append(takeWindow(for: screen)) }
+    }
+
+    private func finish() {
+        window.orderOut(nil)
+        container.removeFromSuperlayer()
+        if Self.spare.count < 3 { Self.spare.append(window) }
+    }
+
     private func run() {
         if falling { update(1); updateFall(0) } else { update(0) }
         window.orderFrontRegardless()
@@ -150,15 +176,15 @@ final class CaptureFlight {
         timer = nil
         completion()
         if falling {
-            window.orderOut(nil)
+            finish()
             return
         }
         // The real card fades in underneath; this one fades out over it.
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.16
             window.animator().alphaValue = 0
-        }, completionHandler: { [window] in
-            MainActor.assumeIsolated { window.orderOut(nil) }
+        }, completionHandler: { [self] in
+            MainActor.assumeIsolated { finish() }
         })
     }
 

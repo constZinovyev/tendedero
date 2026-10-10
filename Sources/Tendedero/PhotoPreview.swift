@@ -22,28 +22,61 @@ final class PhotoPreview {
     private static let shut = Animation.spring(response: 0.34, dampingFraction: 0.95)
 
     private var session: Session?
+    /// One window for every preview, made once: a new window over the whole
+    /// screen each time held up the start of the opening.
+    private var panel: PreviewPanel?
 
     /// - Parameters:
+    ///   - thumb: the card's own picture. The preview starts growing with it
+    ///     at once; the full photo is read in the background and takes its
+    ///     place as soon as it is ready, a moment later.
     ///   - card: the hanging card's frame in screen coordinates while it is in
     ///     view. Asked again on closing, so the preview goes back to where the
     ///     card hangs then.
     ///   - tilt: the card's tilt in degrees, so the preview leaves it at the same angle.
-    func show(_ url: URL, from card: @escaping () -> CGRect?, tilt: Double, on screen: NSScreen?) {
+    func show(_ url: URL, thumb: NSImage, from card: @escaping () -> CGRect?, tilt: Double, on screen: NSScreen?) {
         session?.close(animation: nil)
         session = nil
         guard let screen = screen ?? NSScreen.main,
-              let image = NSImage(contentsOf: url),
-              image.size.width > 0, image.size.height > 0 else { return }
+              let size = Self.pointSize(of: url) ?? Optional(thumb.size),
+              size.width > 0, size.height > 0 else { return }
 
         let start = card().flatMap { $0.intersects(screen.frame) ? $0 : nil }
-        let target = Self.target(for: image.size, near: start, on: screen)
-        let session = Session(image: image, screen: screen, card: card, start: start, target: target, tilt: tilt)
+        let target = Self.target(for: size, near: start, on: screen)
+        let panel = self.panel ?? PreviewPanel(frame: screen.frame)
+        self.panel = panel
+        let session = Session(image: thumb, panel: panel, screen: screen, card: card, start: start, target: target, tilt: tilt)
         session.onDismiss = { [weak self, weak session] in
             guard let self, let session, self.session === session else { return }
             self.close()
         }
         self.session = session
         session.present(with: Self.open)
+
+        DispatchQueue.global(qos: .userInteractive).async {
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let full = CGImageSourceCreateImageAtIndex(
+                      source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) else { return }
+            let image = NSImage(cgImage: full, size: size)
+            DispatchQueue.main.async { [weak session] in session?.showFull(image) }
+        }
+    }
+
+    /// Made ahead of time, so even the first preview opens without a pause.
+    func prepare() {
+        if panel == nil, let screen = NSScreen.main { panel = PreviewPanel(frame: screen.frame) }
+    }
+
+    /// The photo's size in points, from the file's header, the way NSImage
+    /// would give it: a screenshot taken on a Retina screen is half its pixels.
+    private static func pointSize(of url: URL) -> CGSize? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? CGFloat,
+              let h = props[kCGImagePropertyPixelHeight] as? CGFloat else { return nil }
+        let dpi = props[kCGImagePropertyDPIWidth] as? CGFloat ?? 72
+        let scale = dpi > 0 ? 72 / dpi : 1
+        return CGSize(width: w * scale, height: h * scale)
     }
 
     /// Sends the photo back to where it came from.
@@ -94,14 +127,20 @@ private final class Session {
     private var timer: Timer?
     private var hoveredCorner: PreviewStage.Corner?
 
-    init(image: NSImage, screen: NSScreen, card: @escaping () -> CGRect?, start: CGRect?, target: CGRect, tilt: Double) {
+    init(image: NSImage, panel: PreviewPanel, screen: NSScreen, card: @escaping () -> CGRect?,
+         start: CGRect?, target: CGRect, tilt: Double) {
         self.screen = screen
         self.card = card
         self.target = target
+        self.panel = panel
         model = PreviewModel(image: image)
         model.maxSize = screen.visibleFrame.size
-        panel = PreviewPanel(frame: screen.frame)
-        panel.contentView = NSHostingView(rootView: PreviewStage(model: model))
+        if panel.frame != screen.frame { panel.setFrame(screen.frame, display: false) }
+        if let host = panel.contentView as? NSHostingView<PreviewStage> {
+            host.rootView = PreviewStage(model: model)
+        } else {
+            panel.contentView = NSHostingView(rootView: PreviewStage(model: model))
+        }
         panel.onDismiss = { [weak self] in self?.onDismiss() }
         model.onClose = { [weak self] in self?.onDismiss() }
 
@@ -127,7 +166,19 @@ private final class Session {
         return CGRect(x: r.minX + screen.frame.minX, y: screen.frame.maxY - r.maxY, width: r.width, height: r.height)
     }
 
+    /// The full photo, read in the background, in place of the card's picture.
+    func showFull(_ image: NSImage) {
+        guard timer != nil else { return }
+        model.image = image
+    }
+
     func present(with animation: Animation) {
+        // The window may still be fading out after the last preview.
+        panel.owner = ObjectIdentifier(self)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0
+            self.panel.animator().alphaValue = 1
+        }
         panel.makeKeyAndOrderFront(nil)
         withAnimation(animation) {
             model.rect = local(target)
@@ -206,6 +257,7 @@ private final class Session {
             panel.orderOut(nil)
             return
         }
+        let me = ObjectIdentifier(self)
         let back = card().flatMap { $0.intersects(screen.frame) ? $0 : nil }
         withAnimation(animation) {
             if let back {
@@ -218,12 +270,16 @@ private final class Session {
         }
         let panel = panel
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) {
-            // The real card on the line takes over.
+            // The real card on the line takes over, unless a new preview
+            // has taken the window in the meantime.
+            guard panel.owner == me else { return }
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.1
                 panel.animator().alphaValue = 0
             }, completionHandler: {
-                panel.orderOut(nil)
+                MainActor.assumeIsolated {
+                    if panel.owner == me { panel.orderOut(nil) }
+                }
             })
         }
     }
@@ -231,7 +287,7 @@ private final class Session {
 
 @MainActor
 private final class PreviewModel: ObservableObject {
-    let image: NSImage
+    @Published var image: NSImage
     @Published var rect: CGRect = .zero
     @Published var tilt: Double = 0
     @Published var opacity: Double = 1
@@ -250,6 +306,8 @@ private final class PreviewModel: ObservableObject {
 /// the app you were in stays active.
 private final class PreviewPanel: NSPanel {
     var onDismiss: () -> Void = {}
+    /// The preview using the window now.
+    var owner: ObjectIdentifier?
 
     init(frame: NSRect) {
         super.init(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],

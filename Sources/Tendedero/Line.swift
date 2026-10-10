@@ -237,7 +237,7 @@ final class Line: ObservableObject {
     /// as it is and no other app opens.
     func show(_ id: UUID) {
         guard let item = items.first(where: { $0.id == id }) else { return }
-        PhotoPreview.shared.show(item.url, from: { [weak self] in self?.cardScreenFrame?(id) }, tilt: item.tilt,
+        PhotoPreview.shared.show(item.url, thumb: item.thumb, from: { [weak self] in self?.cardScreenFrame?(id) }, tilt: item.tilt,
                                  on: LinePanel.screenUnderPointer())
     }
 
@@ -249,16 +249,25 @@ final class Line: ObservableObject {
     /// Moves the file to the Trash and takes the photo off the line. When a
     /// drag ends on the Dock's Trash, macOS only reports it: deleting the file
     /// is the source app's job, as Finder does.
+    /// The photo falls at once; the file goes to the Trash in the
+    /// background, which can take a moment the first time. Should that
+    /// fail, the photo hangs again where it was.
     func trash(_ id: UUID) {
         guard let item = items.first(where: { $0.id == id }) else { return }
-        do {
-            try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
-            log.notice("Trashed \(item.url.lastPathComponent, privacy: .public)")
-            if soundOn { Line.trashSound?.play() }
-            drop(id, quietly: true)
-        } catch {
-            log.error("Could not trash \(item.url.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            NSSound.beep()
+        if soundOn { Line.trashSound?.play() }
+        drop(id, quietly: true)
+        let url = item.url, position = item.position
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                log.notice("Trashed \(url.lastPathComponent, privacy: .public)")
+            } catch {
+                log.error("Could not trash \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                DispatchQueue.main.async { [weak self] in
+                    NSSound.beep()
+                    self?.hang(url, quietly: true, at: position)
+                }
+            }
         }
     }
 

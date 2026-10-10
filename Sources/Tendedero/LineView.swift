@@ -40,7 +40,12 @@ struct LineView: View {
                         .transition(.opacity)
                 }
 
-                ForEach(line.items) { item in
+                // The views keep one order whatever the stacking, which is
+                // left to zIndex: reordering them made SwiftUI build a photo's
+                // view again from scratch when it came to the front, a pause
+                // and a replayed arrival right as you clicked.
+                let stack = Dictionary(uniqueKeysWithValues: line.items.enumerated().map { ($1.id, Double($0)) })
+                ForEach(line.items.sorted { $0.id.uuidString < $1.id.uuidString }) { item in
                     let x = CGFloat(item.position) * width
                     let ropeY = Layout.ropeY(x: x, width: width)
                     SwayHost(id: item.id, sway: line.sway(item.id), line: line) {
@@ -48,7 +53,7 @@ struct LineView: View {
                     }
                         .frame(width: Layout.cardWidth, height: Layout.panelHeight - ropeY, alignment: .top)
                         .position(x: x, y: ropeY - Layout.pinAbove + (Layout.panelHeight - ropeY) / 2)
-                        .zIndex(line.slidingID == item.id ? 1 : 0)
+                        .zIndex(line.slidingID == item.id ? Double(line.items.count) : stack[item.id] ?? 0)
                 }
             }
             .animation(.spring(response: 0.55, dampingFraction: 0.78), value: line.items.map(\.id))

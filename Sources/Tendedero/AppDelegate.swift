@@ -74,6 +74,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                             owner: pointerRelay, userInfo: nil))
         panel.placeOnScreen()
         updateCapacity()
+        PhotoPreview.shared.prepare()
+        if let screen = NSScreen.main { CaptureFlight.prepare(on: screen) }
 
         // Tendedero sits in the background all day. Napping, macOS would
         // hand it the pointer's moves late, and the decorations would wake
