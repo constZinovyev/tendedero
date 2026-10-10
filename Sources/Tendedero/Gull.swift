@@ -689,6 +689,28 @@ final class Seagulls {
         self.linePanel = linePanel
         self.lineRevealed = lineRevealed
         schedule()
+        // A gull already here notices a new fish.
+        decorations.onFish = { [weak self] in self?.visit?.noticeFish() }
+    }
+
+    /// ⌥⌘F: a bulb turns into a fish, and a gull comes for it: the one
+    /// here if it is free, or a new one.
+    func fishPressed() {
+        guard decorations.hangFish() else { return }
+        if visit == nil || visit?.isLeaving == true {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .random(in: 1.5...4)) { [weak self] in
+                self?.arrive()
+            }
+        }
+    }
+
+    /// The fish on `screen`, in screen coordinates.
+    func fishSpots(on screen: NSScreen) -> [(id: UUID, index: Int, point: CGPoint)] {
+        decorations.fishSpots().filter { screen.frame.contains($0.point) }
+    }
+
+    func snatchFish(_ id: UUID, _ index: Int) -> Bool {
+        decorations.snatchFish(id, index)
     }
 
     /// A visit every one and a half to four minutes.
@@ -762,6 +784,12 @@ final class Seagulls {
         call.keyEquivalent = "g"
         call.keyEquivalentModifierMask = [.option, .command]
         menu.addItem(call)
+        let fish = ClosureMenuItem(L("Hang a fish on a garland", "Colgar un pez en la guirnalda")) { [weak self] in
+            self?.fishPressed()
+        }
+        fish.keyEquivalent = "f"
+        fish.keyEquivalentModifierMask = [.option, .command]
+        menu.addItem(fish)
         let sounds = ClosureMenuItem(L("Seagull sounds", "Sonidos de gaviota")) { [weak self] in
             self?.voice.isOn.toggle()
         }
@@ -866,6 +894,19 @@ final class GullVisit: NSObject {
     /// Points to fly through, then a spot to land on, or away if none.
     private var route: [CGPoint] = []
     private var landing: (perch: Perch, x: CGFloat)?
+    /// The fish it is flying for.
+    private var fishTarget: (id: UUID, index: Int)?
+    /// Carrying a fish in its bill until then, then it is swallowed.
+    private var carryUntil: CFTimeInterval = 0
+    private let fishInBill = CALayer()
+    /// The fish on its screen, looked up a few times a second.
+    private var fishCache: (spots: [(id: UUID, index: Int, point: CGPoint)], at: CFTimeInterval)?
+    private var fishSpots: [(id: UUID, index: Int, point: CGPoint)] {
+        if let c = fishCache, clock - c.at < 0.2 { return c.spots }
+        let spots = world.fishSpots(on: screen)
+        fishCache = (spots, clock)
+        return spots
+    }
     private var perch: Perch?
     private var walkTo: CGFloat?
     private var walkSpeed: CGFloat = 40
@@ -977,6 +1018,15 @@ final class GullVisit: NSObject {
         for part in [farLeg, nearLeg, body, head] { stander.addSublayer(part) }
         window.gullView.layer?.addSublayer(bird)
         window.gullView.layer?.addSublayer(stander)
+        // A fish held crosswise in the bill, head forward, hanging a little.
+        let fish = FishSprite.picture(length: 17, scale: screen.backingScaleFactor)
+        fishInBill.contents = fish.image
+        fishInBill.contentsScale = screen.backingScaleFactor
+        fishInBill.bounds = CGRect(origin: .zero, size: fish.rect.size)
+        // Held by its middle.
+        fishInBill.anchorPoint = CGPoint(x: -fish.rect.minX / fish.rect.width, y: (fish.rect.maxY - fish.length * 0.55) / fish.rect.height)
+        fishInBill.isHidden = true
+        bird.addSublayer(fishInBill)
     }
 
     func start() {
@@ -1000,13 +1050,16 @@ final class GullVisit: NSObject {
     }
 
     /// On its way off the screen, not coming back.
-    var isLeaving: Bool { !following && landing == nil && perch == nil && route.count == 1 && !screen.frame.contains(route[0]) }
+    var isLeaving: Bool {
+        !following && landing == nil && fishTarget == nil && perch == nil && route.count == 1 && !screen.frame.contains(route[0])
+    }
 
     /// Flies off now.
     func leave() {
         following = false
         if case .standing = mode { takeOff() }
         landing = nil
+        fishTarget = nil
         route = [exitPoint()]
     }
 
@@ -1027,6 +1080,8 @@ final class GullVisit: NSObject {
     private func plan(arriving: Bool) {
         let perches = self.perches
         let f = screen.frame
+        // A fish on a garland comes first, more often than not.
+        if !following, fishTarget == nil, Double.random(in: 0..<1) < (arriving ? 0.85 : 0.6), goForFish() { return }
         let land = arriving ? Double.random(in: 0..<1) < 0.85 : hops < 3 && Double.random(in: 0..<1) < 0.45
         if land, let choice = choosePerch(perches) {
             let y = choice.perch.y(at: choice.x)
@@ -1073,6 +1128,36 @@ final class GullVisit: NSObject {
         let out = p.x < f.midX ? f.maxX + 90 : f.minX - 90
         points.append(CGPoint(x: out, y: f.minY + f.height * .random(in: 0.5...0.9)))
         route = points
+    }
+
+    /// Off for the nearest fish, coming at it from the side so the bill
+    /// reaches it. Returns whether there was one.
+    @discardableResult
+    private func goForFish() -> Bool {
+        guard let spot = fishSpots.min(by: { hypot($0.point.x - p.x, $0.point.y - p.y) < hypot($1.point.x - p.x, $1.point.y - p.y) })
+        else { return false }
+        let f = screen.frame
+        fishTarget = (spot.id, spot.index)
+        landing = nil
+        let side: CGFloat = p.x < spot.point.x ? -1 : 1
+        var from = CGPoint(x: spot.point.x + side * .random(in: 150...220), y: min(f.maxY - 60, spot.point.y + .random(in: 60...110)))
+        // Room to swing in from that side, or from the other.
+        if !f.insetBy(dx: 40, dy: 0).contains(CGPoint(x: from.x, y: f.midY)) { from.x = spot.point.x - side * 180 }
+        route = [from]
+        return true
+    }
+
+    /// A new fish while it is here: it goes for it if it is free.
+    func noticeFish() {
+        guard !gone, !following, fishTarget == nil else { return }
+        switch mode {
+        case .standing:
+            guard !busy, squawks == 0 else { return }
+            takeOff()
+            if !goForFish() { plan(arriving: false) }
+        case .flying, .rising:
+            goForFish()
+        }
     }
 
     private func choosePerch(_ perches: [Perch]) -> (perch: Perch, x: CGFloat)? {
@@ -1227,8 +1312,20 @@ final class GullVisit: NSObject {
         }
         let target: CGPoint
         var final = false
+        var forFish = false
         if let first = route.first {
             target = first
+        } else if let fishTarget {
+            guard let spot = fishSpots.first(where: { $0.id == fishTarget.id && $0.index == fishTarget.index }) else {
+                // Gone before it got there.
+                self.fishTarget = nil
+                plan(arriving: false)
+                return
+            }
+            // The body so placed that the bill tip is at the fish.
+            target = CGPoint(x: spot.point.x - facing * 22 * k, y: spot.point.y - 5 * k)
+            final = true
+            forFish = true
         } else if let landing {
             let y = landing.perch.y(at: landing.x) - (bent?.kind == landing.perch.kind ? depth : 0)
             target = CGPoint(x: landing.x, y: y + GullPictures.lift)
@@ -1310,9 +1407,26 @@ final class GullVisit: NSObject {
                 hoverUntil = clock + .random(in: 1.2...2.8)
                 nextHover = hoverUntil + .random(in: 6...14)
             }
+        } else if forFish, dist < 5 || (dist < 12 && speed < 80) {
+            snatch()
         } else if final, dist < 3 || (dist < 10 && speed < 70) {
             touchDown()
         }
+    }
+
+    /// The bill closes on the fish: it is pulled off the garland, the bulbs
+    /// around swing, and the gull climbs away with it, swallowing it soon.
+    private func snatch() {
+        guard let fish = fishTarget else { return }
+        fishTarget = nil
+        if world.snatchFish(fish.id, fish.index) {
+            carryUntil = clock + .random(in: 1.4...2.4)
+            let bill = CGPoint(x: p.x + facing * 22 * k, y: p.y + 5 * k)
+            world.air(at: bill, velocity: CGVector(dx: facing * 500, dy: 400))
+        }
+        flapUntil = clock + 1.0
+        v = CGVector(dx: facing * 110, dy: 170)
+        plan(arriving: false)
     }
 
     private func touchDown() {
@@ -1376,6 +1490,7 @@ final class GullVisit: NSObject {
     /// again somewhere else on the line. The third time it leaves.
     private func startle(from m: CGPoint) {
         scares += 1
+        fishTarget = nil
         world.voice.play(.alarm, at: p)
         takeOff(away: m)
         flapUntil = clock + 1.2
@@ -1529,6 +1644,12 @@ final class GullVisit: NSObject {
     /// What a gull does while it stands about.
     private func haveAnIdea(_ perch: Perch) {
         nextIdea = clock + .random(in: 1.6...4.2)
+        // A fish hanging nearby: now and then it can't resist.
+        if !fishSpots.isEmpty, Double.random(in: 0..<1) < 0.25 {
+            takeOff()
+            if !goForFish() { plan(arriving: false) }
+            return
+        }
         switch Double.random(in: 0..<1) {
         case ..<0.10:
             // A long look up, down or back.
@@ -1615,6 +1736,7 @@ final class GullVisit: NSObject {
         let near = hypot(m.x - p.x, m.y - p.y)
         let still = clock - pointerStillSince
         landing = nil
+        fishTarget = nil
         if near < 50 {
             // The pointer is on it: it holds still to be caught.
             route = [p]
@@ -1796,6 +1918,22 @@ final class GullVisit: NSObject {
         }
         bird.isHidden = flight == nil
         stander.isHidden = flight != nil
+        // The fish in its bill, wriggling a little, until it is swallowed.
+        let carrying = clock < carryUntil && flight != nil
+        fishInBill.isHidden = !carrying
+        if carrying, let r = flight?.rect {
+            // The bill tip in the flight pictures, y down from the body's middle.
+            let tip = CGPoint(x: 21 * k, y: -4.6 * k)
+            fishInBill.position = CGPoint(x: tip.x - r.minX, y: r.maxY - tip.y)
+            let wriggle = 0.12 * CGFloat(sin(clock * 2 * .pi * 3.2)) * CGFloat(min(1, (carryUntil - clock) / 0.8))
+            // Head forward along the bill, drooping a little.
+            fishInBill.transform = CATransform3DMakeRotation(.pi / 2 - 0.35 + wriggle, 0, 0, 1)
+        }
+        if clock >= carryUntil, carryUntil > 0 {
+            // Swallowed, with a call now and then.
+            carryUntil = 0
+            if Bool.random() { world.voice.play(.call, at: p) }
+        }
         if let flight {
             place(bird, flight, at: Sprite.snap(CGPoint(x: at.x - origin.x, y: at.y - origin.y), scale: scale))
             bird.transform = CATransform3DScale(CATransform3DMakeRotation(pitch * facing, 0, 0, 1), facing, 1, 1)

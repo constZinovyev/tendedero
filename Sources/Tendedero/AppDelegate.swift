@@ -109,6 +109,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hotKeys.append(HotKey(keyCode: kVK_ANSI_G, modifiers: optionKey | cmdKey) { [weak self] in
             self?.seagulls.shortcutPressed()
         })
+        // ⌥⌘F: a fish on a garland, for the gull.
+        hotKeys.append(HotKey(keyCode: kVK_ANSI_F, modifiers: optionKey | cmdKey) { [weak self] in
+            self?.seagulls.fishPressed()
+        })
         lockScreen = LockScreen(line: line, panel: panel, decorations: garlands.store)
         watchMenuBarClicks()
 

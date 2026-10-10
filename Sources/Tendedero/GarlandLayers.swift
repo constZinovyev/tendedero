@@ -88,6 +88,10 @@ final class GarlandLayers {
     private var flattenTimer: Timer?
     /// The wire and the bulbs on it, so a bird sitting on it can bend it.
     private var wire: Wire?
+    /// Fish hanging in place of some bulbs, by bulb, above everything else.
+    private var fish: [Int: CALayer] = [:]
+    private let fishLayer = CALayer()
+    private var style = GarlandStyle.defaults
 
     private struct Wire {
         let points: [CGPoint]
@@ -122,12 +126,17 @@ final class GarlandLayers {
         swings = []
         groups = []
         wire = nil
+        fish = [:]
+        fishLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
+        self.style = style
         reach = max(80, style.bulbSize * 14)
         // One shared start time keeps every blinking garland in step.
         let now = CACurrentMediaTime()
         for g in garlands {
             root.addSublayer(layer(for: g, origin: origin, style: style, now: now))
         }
+        fishLayer.frame = root.bounds
+        root.addSublayer(fishLayer)
         CATransaction.commit()
     }
 
@@ -292,15 +301,109 @@ final class GarlandLayers {
             layers.0.path = path
             layers.1.path = path
         }
-        for bulb in wire.bulbs {
+        for (i, bulb) in wire.bulbs.enumerated() {
             let q = CGPoint(x: bulb.rest.x, y: bulb.rest.y - drop(bulb.along))
             for h in bulb.holders { h.position = bent ? q : bulb.rest }
+            fish[i]?.position = bent ? q : bulb.rest
         }
         // While it moves the wire is drawn as it is; still, it is cached.
         wire.fixed.shouldRasterize = !bent
         wire.bent = bent
         self.wire = wire
         if bent { unflatten(until: CACurrentMediaTime() + 0.2) }
+    }
+
+    // MARK: Fish
+
+    /// How long a fish is for these bulbs.
+    private var fishLength: CGFloat { max(14, style.bulbSize * 4.2) }
+
+    /// Hangs fish on bulbs `wanted` and takes them off the others, at once
+    /// (after a rebuild) or, `animated`, the new ones dropping into place.
+    func setFish(_ wanted: Set<Int>, animated: Bool) {
+        guard let wire else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        for (i, layer) in fish where !wanted.contains(i) {
+            layer.removeFromSuperlayer()
+            fish[i] = nil
+            showBulb(i, true)
+        }
+        let picture = FishSprite.picture(length: fishLength, scale: scale)
+        let ink = NSColor(white: 0.045, alpha: 1).cgColor
+        for i in wanted where fish[i] == nil && i < wire.bulbs.count && i < swings.count {
+            let h = holder(picture.image, rect: picture.rect, wire: wire.bulbs[i].holders.first?.position ?? wire.bulbs[i].rest,
+                           lead: style.lead, leadWidth: max(0.6, style.wireWidth * 0.6), ink: ink)
+            fishLayer.addSublayer(h)
+            fish[i] = h
+            swings[i].fish = h
+            showBulb(i, false)
+            if animated {
+                // Drops in on its lead with a little bounce.
+                let drop = CAKeyframeAnimation(keyPath: "transform.scale")
+                drop.values = [0.2, 1.12, 0.96, 1]
+                drop.keyTimes = [0, 0.5, 0.78, 1]
+                drop.duration = 0.45
+                h.add(drop, forKey: "appear")
+                let fade = CABasicAnimation(keyPath: "opacity")
+                fade.fromValue = 0
+                fade.duration = 0.2
+                h.add(fade, forKey: "fade")
+                touch(bulb: i)
+            }
+        }
+        unflatten(until: CACurrentMediaTime() + 0.5)
+    }
+
+    /// Where each fish hangs now, by bulb: the middle of its body, in this
+    /// layer's coordinates.
+    func fishPoints() -> [Int: CGPoint] {
+        fish.mapValues { CGPoint(x: $0.position.x, y: $0.position.y - style.lead - fishLength * 0.6) }
+    }
+
+    /// A gull snatches the fish on bulb `i`: it jerks up and is gone, the
+    /// lead swings, and a moment later the bulb lights up there again.
+    func snatchFish(_ i: Int) {
+        guard let layer = fish[i] else { return }
+        fish[i] = nil
+        if i < swings.count { swings[i].fish = nil }
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { layer.removeFromSuperlayer() }
+        let up = CABasicAnimation(keyPath: "position.y")
+        up.byValue = fishLength * 0.8
+        let gone = CABasicAnimation(keyPath: "opacity")
+        gone.toValue = 0
+        let group = CAAnimationGroup()
+        group.animations = [up, gone]
+        group.duration = 0.12
+        group.fillMode = .forwards
+        group.isRemovedOnCompletion = false
+        layer.add(group, forKey: "snatch")
+        CATransaction.commit()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+            guard let self, self.fish[i] == nil, i < self.swings.count else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            self.showBulb(i, true)
+            for l in [self.swings[i].off, self.swings[i].lit].compactMap({ $0 }) {
+                let pop = CAKeyframeAnimation(keyPath: "transform.scale")
+                pop.values = [0.1, 1.15, 0.97, 1]
+                pop.keyTimes = [0, 0.55, 0.8, 1]
+                pop.duration = 0.4
+                l.add(pop, forKey: "pop")
+            }
+            CATransaction.commit()
+            self.touch(bulb: i)
+            self.unflatten(until: CACurrentMediaTime() + 0.6)
+        }
+        unflatten(until: CACurrentMediaTime() + 1.5)
+    }
+
+    private func showBulb(_ i: Int, _ shown: Bool) {
+        guard i < swings.count else { return }
+        swings[i].off.isHidden = !shown
+        swings[i].lit?.isHidden = !shown
     }
 
     // MARK: Air from the pointer
@@ -310,6 +413,7 @@ final class GarlandLayers {
         let center: CGPoint
         let off: CALayer
         let lit: CALayer?
+        var fish: CALayer?
         var curve: [Double] = []
         var start: CFTimeInterval = 0
         var pushed: CFTimeInterval = 0
@@ -391,6 +495,7 @@ final class GarlandLayers {
         }
         s.off.add(a, forKey: "swing")
         s.lit?.add(a, forKey: "swing")
+        s.fish?.add(a, forKey: "swing")
         return now + delay + a.duration
     }
 

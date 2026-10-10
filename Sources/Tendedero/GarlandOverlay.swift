@@ -45,6 +45,7 @@ final class GarlandController {
             monitors.append(m)
         }
         refresh()
+        scheduleFish()
     }
 
     /// Redraws after changes, once however many came in meanwhile (a drag
@@ -67,6 +68,8 @@ final class GarlandController {
             wanted = store.items.map { .garland($0.id) }
             if store.candles != nil { wanted.append(.candles) }
         }
+        // Fish go with their garland, and while the garlands are edited.
+        fish = store.editing ? [:] : fish.filter { id, _ in store.items.contains { $0.id == id } }
         for (key, window) in windows where !wanted.contains(key) {
             window.orderOut(nil)
             windows[key] = nil
@@ -132,6 +135,73 @@ final class GarlandController {
             touchTimer?.invalidate()
             touchTimer = nil
         }
+    }
+
+    // MARK: Fish
+
+    /// Bulbs with a fish hanging in their place, by garland.
+    private(set) var fish: [UUID: Set<Int>] = [:]
+    private var fishTimer: Timer?
+    /// Told when a fish has been hung, so a gull can come for it.
+    var onFish: (() -> Void)?
+    private static let maxFish = 4
+
+    private var fishCount: Int { fish.values.reduce(0) { $0 + $1.count } }
+
+    /// A fish every one to two and a half minutes, while fewer than three
+    /// hang: more often than the gulls come, so they find some waiting.
+    private func scheduleFish() {
+        fishTimer?.invalidate()
+        let t = Timer(timeInterval: .random(in: 60...150), repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.fishCount < 3 { _ = self.hangFish() }
+                self.scheduleFish()
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        fishTimer = t
+    }
+
+    /// One bulb, on a garland on show, turns into a fish. Returns whether
+    /// one did.
+    @discardableResult
+    func hangFish() -> Bool {
+        guard !store.editing, fishCount < Self.maxFish else { return false }
+        var choices: [(UUID, Int, DecorView)] = []
+        for (key, window) in windows where window.isVisible {
+            guard case .garland(let id) = key else { continue }
+            let taken = fish[id] ?? []
+            // Not right at the ends, where the gull could not reach well.
+            let n = window.decorView.bulbCount
+            guard n > 2 else { continue }
+            for i in 1..<(n - 1) where !taken.contains(i) && !taken.contains(i - 1) && !taken.contains(i + 1) {
+                choices.append((id, i, window.decorView))
+            }
+        }
+        guard let (id, i, view) = choices.randomElement() else { return false }
+        fish[id, default: []].insert(i)
+        view.setFish(fish[id] ?? [], animated: true)
+        onFish?()
+        return true
+    }
+
+    /// The fish on show, in screen coordinates.
+    func fishSpots() -> [(id: UUID, index: Int, point: CGPoint)] {
+        var result: [(id: UUID, index: Int, point: CGPoint)] = []
+        for (id, indices) in fish where !indices.isEmpty {
+            guard let window = windows[.garland(id)], window.isVisible else { continue }
+            for (i, p) in window.decorView.fishPoints() { result.append((id, i, p)) }
+        }
+        return result
+    }
+
+    /// A gull takes the fish: the bulb comes back. Returns whether it was there.
+    func snatchFish(_ id: UUID, _ index: Int) -> Bool {
+        guard fish[id]?.contains(index) == true else { return false }
+        fish[id]?.remove(index)
+        windows[.garland(id)]?.decorView.snatchFish(index)
+        return true
     }
 
     // MARK: Birds
@@ -496,6 +566,7 @@ final class DecorView: NSView {
         case .garland:
             guard let g = garland else { return }
             garlandLayers.render([g], style: store.style, origin: origin, size: bounds.size, scale: scale)
+            garlandLayers.setFish(controller?.fish[g.id] ?? [], animated: false)
             let geo = GarlandGeometry(g)
             geometry = (g, geo, geo.bulbPositions(spacing: g.spacing).map { store.style.bulbCenter(below: $0) })
         }
@@ -555,6 +626,22 @@ final class DecorView: NSView {
         guard case .garland = decor, !store.editing, target == nil, case .bulb(let i) = hit(p) else { return false }
         garlandLayers.touch(bulb: i)
         return true
+    }
+
+    var bulbCount: Int { geometry?.bulbs.count ?? 0 }
+
+    func setFish(_ wanted: Set<Int>, animated: Bool) {
+        garlandLayers.setFish(wanted, animated: animated)
+    }
+
+    /// Where the fish on this garland hang, by bulb, in screen coordinates.
+    func fishPoints() -> [Int: CGPoint] {
+        guard let window else { return [:] }
+        return garlandLayers.fishPoints().mapValues { CGPoint(x: $0.x + window.frame.minX, y: $0.y + window.frame.minY) }
+    }
+
+    func snatchFish(_ i: Int) {
+        garlandLayers.snatchFish(i)
     }
 
     func bend(at p: CGPoint, depth: CGFloat) {
