@@ -121,12 +121,35 @@ final class RopeBend {
     fileprivate weak var view: RopeView?
     fileprivate(set) var x: CGFloat = 0
     fileprivate(set) var depth: CGFloat = 0
+    /// Where a hand pulls the rope, and how far, apart from any bird on it.
+    fileprivate(set) var pullX: CGFloat = 0
+    fileprivate(set) var pullDepth: CGFloat = 0
+
+    /// The hand on the rope: taken at `x` (from the left end), pulled by
+    /// `dy` points, down positive, and let go.
+    var onGrab: (CGFloat) -> Void = { _ in }
+    var onPull: (CGFloat) -> Void = { _ in }
+    var onRelease: () -> Void = {}
 
     func set(x: CGFloat, depth: CGFloat) {
         guard x != self.x || depth != self.depth else { return }
         self.x = x
         self.depth = depth
         view?.redraw()
+    }
+
+    func setPull(x: CGFloat, depth: CGFloat) {
+        guard x != pullX || depth != pullDepth else { return }
+        pullX = x
+        pullDepth = depth
+        view?.redraw()
+    }
+
+    /// How far below its rest the rope hangs at `px` now, under the bird and
+    /// the hand together.
+    func drop(at px: CGFloat, width: CGFloat) -> CGFloat {
+        Self.drop(at: px, load: x, depth: depth, width: width)
+            + Self.drop(at: px, load: pullX, depth: pullDepth, width: width)
     }
 
     /// Where the rope runs beyond each edge of the screen.
@@ -199,7 +222,41 @@ final class RopeView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    /// Only right on the rope, so it can be taken and pulled; the photos
+    /// lie on top and keep their clicks.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let superview, let bend else { return nil }
+        let p = convert(point, from: superview)
+        let w = bounds.width
+        guard p.x >= 0, p.x <= w else { return nil }
+        let y = bounds.height - RopeBend.restY(at: p.x, width: w) - bend.drop(at: p.x, width: w)
+        return abs(p.y - y) <= Self.reach ? self : nil
+    }
+
+    /// How close to the rope the pointer has to be to take it.
+    static let reach: CGFloat = 7
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    private var grabbedAt: NSPoint?
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        grabbedAt = p
+        bend?.onGrab(p.x)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = grabbedAt else { return }
+        // This view's y grows upward, so pulling down makes it smaller.
+        bend?.onPull(start.y - convert(event.locationInWindow, from: nil).y)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard grabbedAt != nil else { return }
+        grabbedAt = nil
+        bend?.onRelease()
+    }
 
     override func layout() {
         super.layout()
@@ -221,20 +278,21 @@ final class RopeView: NSView {
         defer { CATransaction.commit() }
         ropeLayers.frame = bounds
         fade.frame = bounds
-        let load = bend?.x ?? 0, depth = bend?.depth ?? 0
+        let depth = bend?.depth ?? 0, pullDepth = bend?.pullDepth ?? 0
         func y(_ px: CGFloat) -> CGFloat {
-            h - RopeBend.restY(at: px, width: w) - RopeBend.drop(at: px, load: load, depth: depth, width: w)
+            h - RopeBend.restY(at: px, width: w) - (bend?.drop(at: px, width: w) ?? 0)
         }
         let path = CGMutablePath()
         let a = -RopeBend.overhang, b = w + RopeBend.overhang
-        if depth == 0 {
+        if depth == 0 && pullDepth == 0 {
             path.move(to: CGPoint(x: a, y: y(a)))
             path.addQuadCurve(to: CGPoint(x: b, y: y(b)),
                               control: CGPoint(x: w / 2, y: h - Layout.ropeTop - 2 * Layout.sag(width: w)))
         } else {
             let n = 160
             var xs = (0...n).map { a + (b - a) * CGFloat($0) / CGFloat(n) }
-            xs.append(load)
+            if depth != 0 { xs.append(bend?.x ?? 0) }
+            if pullDepth != 0 { xs.append(bend?.pullX ?? 0) }
             xs.sort()
             for (i, px) in xs.enumerated() {
                 let p = CGPoint(x: px, y: y(px))

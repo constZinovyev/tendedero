@@ -615,14 +615,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// mouse while the cursor is over a photo. Everywhere else, clicks go to
     /// whatever is underneath.
     private func updateMousePassThrough(_ mouse: NSPoint) {
-        guard !GrabView.isDragging, line.slidingID == nil else { return }
+        guard !GrabView.isDragging, line.slidingID == nil, !line.ropeHeld else { return }
         let local = panel.convertPoint(fromScreen: mouse)
         let flipped = CGPoint(x: local.x, y: panel.frame.height - local.y)
         let hovered = line.photo(at: flipped, slack: 4)
         if line.hoveredID != hovered { line.hoveredID = hovered }
-        let overPhoto = hovered != nil
-        if panel.ignoresMouseEvents == overPhoto {
-            panel.ignoresMouseEvents = !overPhoto
+        // Right on the rope it catches the mouse too, so the rope can be pulled.
+        let catching = hovered != nil || line.isOnRope(flipped)
+        if panel.ignoresMouseEvents == catching {
+            panel.ignoresMouseEvents = !catching
         }
     }
 

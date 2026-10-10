@@ -473,6 +473,13 @@ final class DecorView: NSView {
 
     private static let handleRadius: CGFloat = 7
     private static let grab: CGFloat = 12
+    /// How far a hand can pull the wire down, and up against its ends.
+    private static let pullDown: CGFloat = 36
+    private static let pullUp: CGFloat = 16
+
+    /// Out of edit mode the wire can be taken and pulled; let go, it bounces.
+    private var pulling = false
+    private var heldFrom: CGFloat = 0
 
     init(decor: Decor, store: Garlands, controller: GarlandController) {
         self.decor = decor
@@ -530,7 +537,9 @@ final class DecorView: NSView {
             let xs = geo.points.map(\.x), ys = geo.points.map(\.y)
             let glow = st.bulbSize * st.haloSize + 6
             let margin = max(glow, Self.grab) + 4
-            let rect = CGRect(x: (xs.min() ?? 0) - margin, y: (ys.min() ?? 0) - st.lightDrop - glow - st.bulbSize * 2,
+            // Room below for the wire pulled down by a hand.
+            let rect = CGRect(x: (xs.min() ?? 0) - margin,
+                              y: (ys.min() ?? 0) - st.lightDrop - glow - st.bulbSize * 2 - Self.pullDown,
                               width: (xs.max() ?? 0) - (xs.min() ?? 0) + margin * 2, height: 0)
             let top = max(ys.max() ?? 0, GarlandGeometry.middle(of: g).y) + margin
             return CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: top - rect.minY).integral
@@ -664,6 +673,16 @@ final class DecorView: NSView {
         moved = false
         target = hit(downPoint)
         if case .candles = target { store.holdSaves = true }
+        pulling = false
+        if !store.editing, let window {
+            switch target {
+            case .wire, .bulb:
+                pulling = true
+                heldFrom = garlandLayers.grab(at: CGPoint(x: downPoint.x - window.frame.minX,
+                                                          y: downPoint.y - window.frame.minY))
+            default: break
+            }
+        }
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -672,6 +691,13 @@ final class DecorView: NSView {
         if hypot(p.x - downPoint.x, p.y - downPoint.y) > 3 { moved = true }
         guard moved else { return }
         let dx = p.x - downPoint.x, dy = p.y - downPoint.y
+        if pulling {
+            // It gives easily at first and harder the farther it goes.
+            let raw = heldFrom - dy
+            let limit = raw > 0 ? Self.pullDown : Self.pullUp
+            garlandLayers.pull(depth: limit * tanh(raw / limit))
+            return
+        }
         if case .candles(let start) = target {
             store.candles?.position = CGPoint(x: start.x + dx, y: start.y + dy)
             return
@@ -704,6 +730,12 @@ final class DecorView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if pulling {
+            pulling = false
+            garlandLayers.release()
+            target = nil
+            return
+        }
         if store.holdSaves {
             store.holdSaves = false
             store.saveCandles()

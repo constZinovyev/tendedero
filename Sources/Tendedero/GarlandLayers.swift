@@ -112,7 +112,12 @@ final class GarlandLayers {
         root.masksToBounds = false
     }
 
-    deinit { MainActor.assumeIsolated { flattenTimer?.invalidate() } }
+    deinit {
+        MainActor.assumeIsolated {
+            flattenTimer?.invalidate()
+            bounce?.invalidate()
+        }
+    }
 
     /// Rebuilds every garland. `origin` is the screen's origin in global
     /// coordinates, so a garland is drawn where it belongs on this screen.
@@ -278,22 +283,115 @@ final class GarlandLayers {
     /// it runs straight from each end to the weight, and the bulbs go down
     /// with it. A depth of zero puts it back as drawn and caches it again.
     func bend(at p: CGPoint, depth: CGFloat) {
-        guard var wire, let total = wire.lengths.last, total > 0 else { return }
-        let bent = abs(depth) > 0.05
-        guard bent || wire.bent else { return }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        defer { CATransaction.commit() }
+        birdLoad = (p, depth)
+        applyLoads()
+    }
+
+    /// A bird sitting on the wire, and a hand pulling it, each where it is
+    /// and how far it pulls the wire down there.
+    private var birdLoad: (point: CGPoint, depth: CGFloat) = (.zero, 0)
+    private var handLoad: (point: CGPoint, depth: CGFloat) = (.zero, 0)
+    private var bounce: Timer?
+
+    /// The wire taken at `p` by a hand, before it is pulled. Taken again
+    /// while it still bounces, it is held where it is now.
+    func grab(at p: CGPoint) -> CGFloat {
+        bounce?.invalidate()
+        bounce = nil
+        guard let wire, handLoad.depth != 0 else {
+            handLoad = (p, 0)
+            return 0
+        }
+        let now = drop(along: wire.lengths[nearest(to: p, on: wire)], wire: wire, load: handLoad)
+        handLoad = (p, now)
+        return now
+    }
+
+    /// The hand pulls the wire `depth` points down where it took it.
+    func pull(depth: CGFloat) {
+        bounce?.invalidate()
+        bounce = nil
+        handLoad.depth = depth
+        applyLoads()
+    }
+
+    /// Let go, the wire springs back past its rest and bounces up and down
+    /// a few times, and the bulbs on it swing as it shakes them. Driven
+    /// frame by frame only while it bounces.
+    func release() {
+        let from = handLoad.depth
+        guard abs(from) > 0.5, let wire else {
+            pull(depth: 0)
+            return
+        }
+        let start = CACurrentMediaTime()
+        let frequency = 2.1, decay = 2.4
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let t = CACurrentMediaTime() - start
+                let envelope = Double(from) * exp(-decay * t)
+                if abs(envelope) < 0.3 {
+                    self.bounce?.invalidate()
+                    self.bounce = nil
+                    self.handLoad.depth = 0
+                } else {
+                    self.handLoad.depth = CGFloat(envelope * cos(2 * .pi * frequency * t))
+                }
+                self.applyLoads()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        bounce = timer
+        // The jerk sets the bulbs swinging on their leads, the ones near
+        // the hand most, each a moment after the one before.
+        guard root.superlayer?.speed != 0, let total = wire.lengths.last, total > 0 else { return }
+        let at = wire.lengths[nearest(to: handLoad.point, on: wire)]
+        let now = CACurrentMediaTime()
+        var until: CFTimeInterval = 0
+        for (i, s) in swings.enumerated() where i < wire.bulbs.count {
+            let along = wire.bulbs[i].along
+            let near = Double(along < at ? along / max(at, 1) : (total - along) / max(total - at, 1))
+            let kick = min(2.4, abs(Double(from)) * 0.07) * (0.3 + 0.7 * near) * .random(in: 0.6...1.2)
+            let dir: Double = Bool.random() ? 1 : -1
+            let curve = Self.pendulum(angle: s.angle, velocity: s.velocity + dir * kick)
+            until = max(until, swing(i, curve, at: now, delay: Double(abs(along - at)) / 1800))
+        }
+        if until > 0 { unflatten(until: until) }
+    }
+
+    private func nearest(to p: CGPoint, on wire: Wire) -> Int {
         var nearest = 0, best = CGFloat.greatestFiniteMagnitude
         for (i, q) in wire.points.enumerated() {
             let d = hypot(q.x - p.x, q.y - p.y)
             if d < best { best = d; nearest = i }
         }
-        let at = min(max(wire.lengths[nearest], 1), total - 1)
-        let drop: (CGFloat) -> CGFloat = { s in
-            guard bent else { return 0 }
+        return nearest
+    }
+
+    /// How far a load pulls the wire down `s` along it.
+    private func drop(along s: CGFloat, wire: Wire, load: (point: CGPoint, depth: CGFloat)) -> CGFloat {
+        guard abs(load.depth) > 0.05, let total = wire.lengths.last, total > 0 else { return 0 }
+        let at = min(max(wire.lengths[nearest(to: load.point, on: wire)], 1), total - 1)
+        return load.depth * (s < at ? s / at : (total - s) / (total - at))
+    }
+
+    private func applyLoads() {
+        guard var wire, let total = wire.lengths.last, total > 0 else { return }
+        let bent = abs(birdLoad.depth) > 0.05 || abs(handLoad.depth) > 0.05
+        guard bent || wire.bent else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        let w = wire, bird = birdLoad, hand = handLoad
+        // Where each load sits along the wire, found once for every point.
+        let birdAt = abs(bird.depth) > 0.05 ? min(max(w.lengths[nearest(to: bird.point, on: w)], 1), total - 1) : nil
+        let handAt = abs(hand.depth) > 0.05 ? min(max(w.lengths[nearest(to: hand.point, on: w)], 1), total - 1) : nil
+        func part(_ s: CGFloat, _ at: CGFloat?, _ depth: CGFloat) -> CGFloat {
+            guard let at else { return 0 }
             return depth * (s < at ? s / at : (total - s) / (total - at))
         }
+        let drop: (CGFloat) -> CGFloat = { s in part(s, birdAt, bird.depth) + part(s, handAt, hand.depth) }
         let strands = wire.strands.count
         for (k, layers) in wire.strands.enumerated() {
             let path = Self.strand(k, of: strands, points: wire.points, normals: wire.normals, lengths: wire.lengths,

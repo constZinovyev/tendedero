@@ -231,9 +231,12 @@ final class SwayView: NSView {
     /// while Core Animation swings the photo. The point is turned back to
     /// where it falls on the photo at rest, so a click lands on the photo,
     /// and on its cross, as they are drawn.
+    /// The empty space around the card is left alone, so the rope it
+    /// covers by the pin can still be taken.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let superview else { return super.hitTest(point) }
-        return super.hitTest(convert(atRest(convert(point, from: superview)), to: superview))
+        let hit = super.hitTest(convert(atRest(convert(point, from: superview)), to: superview))
+        return hit === self || hit === host ? nil : hit
     }
 
     /// A point in the window, moved to where it falls on the photo at rest.

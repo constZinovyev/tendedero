@@ -113,6 +113,9 @@ final class Line: ObservableObject {
     init() {
         restore()
         scheduleGust()
+        rope.onGrab = { [weak self] x in self?.grabRope(at: x) }
+        rope.onPull = { [weak self] dy in self?.pullRope(by: dy) }
+        rope.onRelease = { [weak self] in self?.releaseRope() }
     }
 
     // MARK: Hanging and dropping
@@ -358,9 +361,92 @@ final class Line: ObservableObject {
     /// A depth of zero straightens it.
     func bendRope(at x: CGFloat, depth: CGFloat) {
         rope.set(x: x, depth: depth)
+        lowerPhotos()
+    }
+
+    /// Every photo goes down as far as the rope under its pin.
+    private func lowerPhotos() {
         for item in items where !item.falling {
+            sway(item.id).lower(rope.drop(at: CGFloat(item.position) * width, width: width))
+        }
+    }
+
+    // MARK: A hand on the rope
+
+    /// Whether the rope is in a hand right now.
+    private(set) var ropeHeld = false
+    private var bounce: Timer?
+
+    /// Whether `p`, in the panel's coordinates with y down, is right on the
+    /// rope, where it can be taken.
+    func isOnRope(_ p: CGPoint) -> Bool {
+        guard revealed, p.x >= 0, p.x <= width else { return false }
+        let y = topOffset + RopeBend.restY(at: p.x, width: width) + rope.drop(at: p.x, width: width)
+        return abs(p.y - y) <= RopeView.reach
+    }
+
+    private func grabRope(at x: CGFloat) {
+        bounce?.invalidate()
+        bounce = nil
+        ropeHeld = true
+        // Taken again while it still bounces: it is held where it is now.
+        let now = rope.pullDepth != 0 ? RopeBend.drop(at: x, load: rope.pullX, depth: rope.pullDepth, width: width) : 0
+        heldFrom = now
+        rope.setPull(x: x, depth: now)
+        lowerPhotos()
+    }
+    private var heldFrom: CGFloat = 0
+
+    /// Pulled `dy` points from where it was taken, down positive. The rope
+    /// gives easily at first and harder the farther it goes, more so up,
+    /// where it is pulled taut against its ends.
+    private func pullRope(by dy: CGFloat) {
+        guard ropeHeld else { return }
+        let raw = heldFrom + dy
+        let limit: CGFloat = raw > 0 ? 34 : min(14, max(0, RopeBend.restY(at: rope.pullX, width: width) - 2))
+        let depth = limit > 0 ? limit * tanh(raw / limit) : 0
+        rope.setPull(x: rope.pullX, depth: depth)
+        lowerPhotos()
+    }
+
+    /// Let go, the rope springs back past its rest and bounces up and down
+    /// a few times, and the photos on it swing as it shakes them.
+    private func releaseRope() {
+        guard ropeHeld else { return }
+        ropeHeld = false
+        let from = rope.pullDepth, x = rope.pullX
+        guard abs(from) > 0.5 else {
+            rope.setPull(x: x, depth: 0)
+            lowerPhotos()
+            return
+        }
+        let start = CACurrentMediaTime()
+        // About two and a half bounces a second, dying away over a second
+        // or two. Driven frame by frame only while it bounces.
+        let frequency = 2.4, decay = 2.6
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let t = CACurrentMediaTime() - start
+                let envelope = Double(from) * exp(-decay * t)
+                if abs(envelope) < 0.3 {
+                    self.bounce?.invalidate()
+                    self.bounce = nil
+                    self.rope.setPull(x: x, depth: 0)
+                } else {
+                    self.rope.setPull(x: x, depth: CGFloat(envelope * cos(2 * .pi * frequency * t)))
+                }
+                self.lowerPhotos()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        bounce = timer
+        // The jerk sets every photo swinging, the ones near the hand most.
+        for item in items where !item.falling && item.id != draggingID && item.id != slidingID {
             let pin = CGFloat(item.position) * width
-            sway(item.id).lower(RopeBend.drop(at: pin, load: x, depth: depth, width: width))
+            let near = Double(RopeBend.drop(at: pin, load: x, depth: 1, width: width))
+            let degrees = min(9, abs(Double(from)) * 0.22) * (0.35 + 0.65 * near) * .random(in: 0.7...1.1)
+            sway(item.id).nudge((Bool.random() ? 1 : -1) * degrees)
         }
     }
 
