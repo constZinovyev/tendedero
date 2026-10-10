@@ -19,7 +19,7 @@ final class GullPictures: @unchecked Sendable {
     }
 
     /// The bird's size: 1 is about 47 points from tail to bill.
-    static let size: CGFloat = 1.2
+    static let size: CGFloat = 1.3
     /// The body's middle in flight is this far above the feet.
     static let lift: CGFloat = 15 * size
     /// Moments in one wingbeat.
@@ -105,17 +105,16 @@ final class GullPictures: @unchecked Sendable {
         func draw(_ rect: CGRect, shadow: Bool = true, _ body: @escaping (CGContext) -> Void) -> Picture {
             let image = Sprite.draw(rect, scale: scale) { ctx in
                 if shadow {
-                    ctx.setShadow(offset: CGSize(width: 0, height: -1.2 * scale), blur: 3 * scale,
-                                  color: Sprite.rgba(0, 0, 0, 0.24))
+                    ctx.setShadow(offset: CGSize(width: 0, height: -1 * scale), blur: 1.8 * scale,
+                                  color: Sprite.rgba(0, 0, 0, 0.22))
                 }
                 ctx.beginTransparencyLayer(auxiliaryInfo: nil)
                 ctx.scaleBy(x: k, y: k)
                 body(ctx)
                 ctx.endTransparencyLayer()
             }
-            // A touch of softness, so the edges read like feathers, not ink.
-            return Picture(image: image.flatMap { Sprite.blurred($0, radius: 0.32 * scale) } ?? image,
-                           rect: Sprite.aligned(rect, scale: scale))
+            // Kept sharp: shown pixel for pixel, any softening reads as a blur.
+            return Picture(image: image, rect: Sprite.aligned(rect, scale: scale))
         }
         let n = Self.phases
         var flap: [View: [Picture]] = [:], glide: [View: Picture] = [:]
@@ -182,8 +181,8 @@ final class GullPictures: @unchecked Sendable {
                           [(0, Sprite.rgba(255, 255, 255, 0)), (0.6, alpha(shade, depth * 0.4)), (1, alpha(shade, depth))])
             feathers(ctx, in: union.boundingBoxOfPath, strength: 1, seed: seed)
             let edge = {
-                Sprite.stroke(ctx, union, alpha(rim, 0.1), width: 3.4)
-                Sprite.stroke(ctx, union, alpha(rim, 0.22), width: 1.1)
+                Sprite.stroke(ctx, union, alpha(rim, 0.1), width: 3.0)
+                Sprite.stroke(ctx, union, alpha(rim, 0.34), width: 0.9)
             }
             if let rimClip { Sprite.clipped(ctx, rimClip, edge) } else { edge() }
         }
@@ -651,8 +650,10 @@ struct Perch {
 // MARK: - Visits
 
 /// Now and then a seagull flies over the desktop. Sometimes it only passes
-/// by, more often it lands on the line, now and then on a garland, looks
-/// around, preens, walks a little, and flies off. The rope sags under it
+/// by, more often it circles and lands on the line, now and then on a
+/// garland, and stays a minute or two: it looks around, preens, strolls and
+/// hops along, stretches its wings, pecks at the rope, sits down for a rest,
+/// calls, and flies off. The rope sags under it
 /// and swings when it lands or takes off; its wings stir the bulbs and the
 /// candle flames. Double-click it and it follows the pointer until
 /// double-clicked again. ⌥⌘G calls one or sends it away; pressed twice
@@ -874,6 +875,15 @@ final class GullVisit: NSObject {
     private var shakeUntil: CFTimeInterval = 0
     private var ruffledUntil: CFTimeInterval = 0
     private var crouchUntil: CFTimeInterval = 0
+    /// Sitting down on the perch for a rest, legs folded under it.
+    private var restUntil: CFTimeInterval = 0
+    /// Both wings stretched up over the back, fluttering a little.
+    private var stretchUntil: CFTimeInterval = 0
+    /// Pecking at the rope under its feet.
+    private var peckUntil: CFTimeInterval = 0
+    /// A little hop along the perch, wings half open.
+    private var hop: (from: CGFloat, to: CGFloat, start: CFTimeInterval)?
+    private static let hopTime = 0.42
     /// Just landed: the wings are still up for a moment.
     private var touchdownUntil: CFTimeInterval = 0
     private var squawks = 0
@@ -913,6 +923,12 @@ final class GullVisit: NSObject {
     private var lastAir: CFTimeInterval = 0
 
     private var k: CGFloat { GullPictures.size }
+    private var scale: CGFloat { screen.backingScaleFactor }
+
+    /// Busy with something of its own, not to be interrupted by a new idea.
+    private var busy: Bool {
+        walkTo != nil || hop != nil || clock < preenUntil || clock < restUntil || clock < stretchUntil || clock < peckUntil
+    }
 
     /// What it can stand on, looked up at most twice a second.
     private var perchCache: (perches: [Perch], at: CFTimeInterval)?
@@ -983,12 +999,21 @@ final class GullVisit: NSObject {
     private func plan(arriving: Bool) {
         let perches = self.perches
         let f = screen.frame
-        let land = arriving ? Double.random(in: 0..<1) < 0.75 : hops < 2 && Double.random(in: 0..<1) < 0.3
+        let land = arriving ? Double.random(in: 0..<1) < 0.85 : hops < 3 && Double.random(in: 0..<1) < 0.45
         if land, let choice = choosePerch(perches) {
             let y = choice.perch.y(at: choice.x)
-            // Come round from above and behind the spot.
-            let side: CGFloat = p.x < choice.x ? -1 : 1
-            route = [CGPoint(x: choice.x + side * .random(in: 120...220), y: min(f.maxY - 60, y + .random(in: 90...160)))]
+            // Often a turn or two over the screen first, looking the place
+            // over; then round from above and behind the spot.
+            route = []
+            if Double.random(in: 0..<1) < (arriving ? 0.6 : 0.35) {
+                for _ in 0..<Int.random(in: 1...2) {
+                    route.append(CGPoint(x: f.minX + f.width * .random(in: 0.15...0.85),
+                                         y: f.minY + f.height * .random(in: 0.45...0.85)))
+                }
+            }
+            let from = route.last ?? p
+            let side: CGFloat = from.x < choice.x ? -1 : 1
+            route.append(CGPoint(x: choice.x + side * .random(in: 120...220), y: min(f.maxY - 60, y + .random(in: 90...160))))
             landing = choice
             if !arriving { hops += 1 }
             return
@@ -1007,6 +1032,11 @@ final class GullVisit: NSObject {
             points.append(CGPoint(x: x, y: wire.y(at: x) + 26))
         } else {
             points.append(CGPoint(x: f.midX + .random(in: -200...200), y: f.minY + f.height * .random(in: 0.35...0.7)))
+        }
+        // A wide turn back over the screen before it goes.
+        if Bool.random() {
+            let back: CGFloat = p.x < f.midX ? 0.2 : 0.8
+            points.append(CGPoint(x: f.minX + f.width * (back + .random(in: -0.1...0.1)), y: f.minY + f.height * .random(in: 0.55...0.85)))
         }
         let out = p.x < f.midX ? f.maxX + 90 : f.minX - 90
         points.append(CGPoint(x: out, y: f.minY + f.height * .random(in: 0.5...0.9)))
@@ -1113,7 +1143,7 @@ final class GullVisit: NSObject {
         draw()
         // Standing still it only breathes, blinks and looks about: a calmer pace will do.
         var calm = false
-        if case .standing = mode, walkTo == nil, bent == nil || abs(depthSpeed) < 2 { calm = !following }
+        if case .standing = mode, walkTo == nil, hop == nil, clock >= stretchUntil, bent == nil || abs(depthSpeed) < 2 { calm = !following }
         if calm != calmPace {
             calmPace = calm
             link.preferredFrameRateRange = calm ? CAFrameRateRange(minimum: 24, maximum: 30, preferred: 30)
@@ -1171,7 +1201,7 @@ final class GullVisit: NSObject {
         let dist = hypot(dx, dy)
         let approaching = final && dist < 120
         if approaching { gliding = false }
-        let cruise: CGFloat = following ? 520 : 330
+        let cruise: CGFloat = following ? 520 : 290
         let wanted = approaching ? min(cruise, max(40, dist * 2.4)) : min(cruise, max(120, dist * 2.2))
         let want = CGVector(dx: dx / max(dist, 1) * wanted, dy: dy / max(dist, 1) * wanted)
         let turn: CGFloat = approaching ? 5 : (following ? 3.4 : 2.2)
@@ -1240,7 +1270,7 @@ final class GullVisit: NSObject {
         nextGlance = clock + 0.5
         nextBlink = clock + .random(in: 0.8...2)
         nextIdea = clock + .random(in: 1...2.5)
-        leaveAt = clock + .random(in: 14...40)
+        leaveAt = clock + .random(in: 50...120)
         if bent?.kind != landing.perch.kind, let old = bent {
             world.bend(old.kind, at: old.at, depth: 0)
             bent = nil
@@ -1267,6 +1297,11 @@ final class GullVisit: NSObject {
         self.perch = nil
         walkTo = nil
         preenUntil = 0
+        restUntil = 0
+        stretchUntil = 0
+        peckUntil = 0
+        if let hop { p.x = hop.to }
+        hop = nil
         squawks = 0
         world.air(at: p, velocity: CGVector(dx: facing * 600, dy: -380))
     }
@@ -1311,19 +1346,33 @@ final class GullVisit: NSObject {
                 startle(from: m)
                 return
             }
-            if clock > leaveAt && walkTo == nil && clock > preenUntil {
+            if clock > leaveAt && !busy {
                 takeOff()
                 plan(arriving: false)
                 return
             }
-            if pointerNear < 260 && pointerSpeed > 60 && walkTo == nil && clock > preenUntil && clock - lastTurnToPointer > 1.2 {
+            if pointerNear < 260 && pointerSpeed > 60 && !busy && clock - lastTurnToPointer > 1.2 {
                 lastTurnToPointer = clock
                 facing = m.x > p.x ? 1 : -1
                 headTarget = m.y > p.y + 30 * k ? -0.25 : 0.15
                 headBack = false
                 holdUntil = clock + 0.8
             }
-            if clock > nextIdea && walkTo == nil && clock > preenUntil && squawks == 0 { haveAnIdea(perch) }
+            if clock > nextIdea && !busy && squawks == 0 { haveAnIdea(perch) }
+        }
+
+        if let h = hop {
+            let t = min(1, (clock - h.start) / Self.hopTime)
+            let e = CGFloat(t * t * (3 - 2 * t))
+            p.x = h.from + (h.to - h.from) * e
+            if t >= 1 {
+                hop = nil
+                // Down again: the rope gives a little.
+                depthSpeed += 16
+                world.jolt(perch.kind, at: p, strength: 0.5)
+                crouchUntil = clock + 0.14
+                ruffledUntil = clock + 0.35
+            }
         }
 
         if let to = walkTo {
@@ -1348,9 +1397,11 @@ final class GullVisit: NSObject {
     /// moment, calls with the head thrown up, preening in bursts with the
     /// bill deep in the back feathers.
     private func live(dt: CGFloat) {
+        let resting = clock < restUntil
         if clock > nextBlink {
-            blinkUntil = clock + 0.13
-            nextBlink = clock + .random(in: 1.5...5)
+            // Resting, the eyes close slowly and stay shut a while.
+            blinkUntil = clock + (resting ? .random(in: 0.5...1.6) : 0.13)
+            nextBlink = blinkUntil + (resting ? .random(in: 0.6...2.5) : .random(in: 1.5...5))
         }
         if squawks > 0 {
             if clock > squawkAt {
@@ -1374,12 +1425,23 @@ final class GullVisit: NSObject {
                 nextNibble = nibbleUntil + .random(in: 0.25...0.7)
                 headTarget = .random(in: 0.75...1.05)
             }
-        } else if walkTo == nil && clock > holdUntil && clock > nextGlance {
+        } else if clock < peckUntil {
+            // Pecking at the rope: quick jabs down, the head up a little
+            // between them.
+            headBack = false
+            if clock > nextNibble {
+                nibbleUntil = clock + .random(in: 0.2...0.45)
+                nextNibble = nibbleUntil + .random(in: 0.3...0.9)
+                headTarget = .random(in: 1.05...1.3)
+            } else if clock > nibbleUntil {
+                headTarget = 0.55
+            }
+        } else if walkTo == nil && hop == nil && clock > holdUntil && clock > nextGlance {
             // A glance: the head turns quickly and holds still.
-            headBack = Double.random(in: 0..<1) < 0.12
+            headBack = Double.random(in: 0..<1) < (resting ? 0.25 : 0.12)
             headTarget = .random(in: -0.25...0.3)
-            nextGlance = clock + .random(in: 0.4...2.4)
-            if Double.random(in: 0..<1) < 0.08 { facing = -facing }
+            nextGlance = clock + (resting ? .random(in: 2...5) : .random(in: 0.4...2.4))
+            if !resting, Double.random(in: 0..<1) < 0.08 { facing = -facing }
         }
         if headBack && clock >= preenUntil && clock > holdUntil && clock > nextGlance - 0.2 { headBack = false }
         let ease = min(1, dt * (clock < nibbleUntil ? 30 : 16))
@@ -1390,29 +1452,66 @@ final class GullVisit: NSObject {
     private func haveAnIdea(_ perch: Perch) {
         nextIdea = clock + .random(in: 1.6...4.2)
         switch Double.random(in: 0..<1) {
-        case ..<0.16:
+        case ..<0.12:
             // A long look up, down or back.
             headBack = Double.random(in: 0..<1) < 0.35
             headTarget = [-0.4, 0.5, 0.05].randomElement()!
             holdUntil = clock + .random(in: 0.8...2)
-        case ..<0.36:
+        case ..<0.26:
             preenUntil = clock + .random(in: 2.2...5)
             nextNibble = clock + 0.25
             nextIdea = preenUntil + 0.8
-        case ..<0.44:
+        case ..<0.32:
             // A shake: the feathers fluffed and shaken back into place.
             shakeUntil = clock + 0.45
             ruffledUntil = clock + 0.9
-        case ..<0.52:
-            squawks = Int.random(in: 1...3)
+        case ..<0.38:
+            // Calls; now and then the long call, many in a row.
+            squawks = Double.random(in: 0..<1) < 0.25 ? Int.random(in: 4...6) : Int.random(in: 1...3)
             squawkAt = clock
-        case ..<0.78:
-            let dx = CGFloat.random(in: 20...90) * (Bool.random() ? 1 : -1)
+        case ..<0.56:
+            // A stroll, sometimes a long one down the line.
+            let far = Double.random(in: 0..<1) < 0.3
+            let dx = (far ? CGFloat.random(in: 100...220) : .random(in: 20...90)) * (Bool.random() ? 1 : -1)
             if let x = perch.spot(near: p.x + dx), abs(x - p.x) > 8 {
                 walkTo = x
                 walkSpeed = .random(in: 30...48)
             }
-        case ..<0.9:
+        case ..<0.64:
+            // A hop along the perch.
+            let dx = CGFloat.random(in: 28...70) * (Bool.random() ? 1 : -1)
+            if let x = perch.spot(near: p.x + dx), abs(x - p.x) > 16 {
+                facing = x > p.x ? 1 : -1
+                hop = (p.x, x, clock)
+                headBack = false
+                headTarget = 0
+                turnedUntil = 0
+                crouchUntil = clock + 0.1
+                depthSpeed -= 12
+                world.air(at: CGPoint(x: p.x, y: p.y + GullPictures.lift), velocity: CGVector(dx: facing * 260, dy: -200))
+            }
+        case ..<0.70:
+            // Both wings stretched up high for a moment.
+            stretchUntil = clock + .random(in: 0.9...1.5)
+            headBack = false
+            turnedUntil = 0
+            world.air(at: CGPoint(x: p.x, y: p.y + GullPictures.lift), velocity: CGVector(dx: facing * 200, dy: -260))
+            nextIdea = stretchUntil + 1
+        case ..<0.76:
+            // Pecks at the rope under its feet.
+            peckUntil = clock + .random(in: 1.5...3.5)
+            nextNibble = clock + 0.15
+            turnedUntil = 0
+            nextIdea = peckUntil + 0.6
+        case ..<0.82:
+            // Sits down for a rest.
+            restUntil = clock + .random(in: 5...12)
+            nextBlink = clock + 0.8
+            headBack = false
+            headTarget = 0.1
+            nextIdea = restUntil + 1
+            leaveAt = max(leaveAt, restUntil + 4)
+        case ..<0.91:
             // Turns towards you for a while.
             turnedUntil = clock + .random(in: 3...8)
             headBack = false
@@ -1524,7 +1623,7 @@ final class GullVisit: NSObject {
     private func swingPerch(dt: CGFloat) {
         guard let b = bent else { return }
         let loaded: Bool = {
-            if case .standing = mode, let perch, perch.kind == b.kind { return true }
+            if case .standing = mode, hop == nil, let perch, perch.kind == b.kind { return true }
             return false
         }()
         let weight: CGFloat = loaded ? 6 : 0
@@ -1576,6 +1675,20 @@ final class GullVisit: NSObject {
             flight = pictures.flapLegs[0]
             at.y += GullPictures.lift
             pitch = 0.15
+        case .standing where hop != nil:
+            // Hopping: up and along, the wings half open.
+            let t = min(1, (clock - hop!.start) / Self.hopTime)
+            let n = GullPictures.phases
+            flight = pictures.flapLegs[Int(t * Double(n) * 1.5) % n]
+            at.y += GullPictures.lift + CGFloat(sin(.pi * t)) * 12 * k
+            pitch = 0.12
+        case .standing where clock < stretchUntil:
+            // The wings stretched up over the back, fluttering.
+            let n = GullPictures.phases
+            let i = Int((clock * 7).rounded()) % 3
+            flight = pictures.flapLegs[[n - 1, 0, 1][i]]
+            at.y += GullPictures.lift
+            pitch = 0.05
         case .standing, .rising:
             break
         case .flying:
@@ -1591,11 +1704,13 @@ final class GullVisit: NSObject {
             }
             pitch = max(-0.35, min(0.35, atan2(v.dy, max(abs(v.dx), 90)) * 0.6))
             if legs { pitch = 0.3 }
+            // Nearly level it is drawn level: any turn resamples the picture.
+            if abs(pitch) < 0.03 { pitch = 0 }
         }
         bird.isHidden = flight == nil
         stander.isHidden = flight != nil
         if let flight {
-            place(bird, flight, at: CGPoint(x: at.x - origin.x, y: at.y - origin.y))
+            place(bird, flight, at: Sprite.snap(CGPoint(x: at.x - origin.x, y: at.y - origin.y), scale: scale))
             bird.transform = CATransform3DScale(CATransform3DMakeRotation(pitch * facing, 0, 0, 1), facing, 1, 1)
             return
         }
@@ -1610,7 +1725,10 @@ final class GullVisit: NSObject {
         let j = GullPictures.joints(turn)
         let ruffled = clock < ruffledUntil
         // Unscaled, y down: how far the body is lowered.
+        let resting = clock < restUntil && walkTo == nil
         var dy: CGFloat = clock < crouchUntil || { if case .rising = mode { return true } else { return false } }() ? 2.4 : 0
+        // Sitting, the body is down on its folded legs.
+        if resting { dy = 5.6 }
         var nearSwing: CGFloat = turn == .turned ? 0.12 : 0, farSwing: CGFloat = turn == .turned ? -0.1 : 0
         var nearLift: CGFloat = 1, farLift: CGFloat = 1
         if walkTo != nil {
@@ -1622,29 +1740,38 @@ final class GullVisit: NSObject {
             dy -= 0.8 * abs(sin(a))
         }
         let crouch: CGFloat = dy > 1 ? (10.2 - dy) / 10.2 : 1
-        let breath = 1 + 0.012 * CGFloat(sin(2 * .pi * 0.42 * clock))
+        // Breathing lifts the head a hair; the body itself is not scaled,
+        // which would resample it and soften every feather.
+        let breath = 0.35 * CGFloat(sin(2 * .pi * (resting ? 0.3 : 0.42) * clock))
         let shake: CGFloat = clock < shakeUntil ? 0.06 * CGFloat(sin(2 * .pi * 11 * clock)) : 0
 
-        stander.position = feet
+        stander.position = Sprite.snap(feet, scale: scale)
         stander.transform = CATransform3DMakeScale(facing, 1, 1)
-        func local(_ q: CGPoint) -> CGPoint { CGPoint(x: q.x * k, y: -q.y * k) }
+        func local(_ q: CGPoint) -> CGPoint { Sprite.snap(CGPoint(x: q.x * k, y: -q.y * k), scale: scale) }
 
         place(body, pictures.body[turn]![ruffled]!, at: local(CGPoint(x: 0, y: dy)))
-        body.transform = CATransform3DRotate(CATransform3DMakeScale(1, breath, 1), shake, 0, 0, 1)
+        body.transform = shake == 0 ? CATransform3DIdentity : CATransform3DMakeRotation(shake, 0, 0, 1)
 
         for (leg, picture, hip, swing, lift) in [(farLeg, pictures.farLeg, j.farHip, farSwing, farLift),
                                                  (nearLeg, pictures.nearLeg, j.nearHip, nearSwing, nearLift)] {
             place(leg, picture, at: local(CGPoint(x: hip.x, y: hip.y + dy)))
-            leg.transform = CATransform3DRotate(CATransform3DMakeScale(1, min(lift, crouch), 1), swing, 0, 0, 1)
+            let squash = min(lift, crouch)
+            leg.transform = swing == 0 && squash == 1 ? CATransform3DIdentity
+                : CATransform3DRotate(CATransform3DMakeScale(1, squash, 1), swing, 0, 0, 1)
         }
 
         // Preening, the head goes back over the wing.
-        let neck = preening && headBack ? CGPoint(x: -1.2, y: -26.2) : j.neck
+        var neck = preening && headBack ? CGPoint(x: -1.2, y: -26.2) : j.neck
+        // Resting, the head is drawn in on the shoulders.
+        if resting { neck.x -= 1; neck.y += 1.8 }
         let nibble: CGFloat = clock < nibbleUntil ? 0.13 * CGFloat(sin(2 * .pi * 7.5 * clock)) : 0
         let bill: GullPictures.Bill = clock < billOpenUntil ? .open : (clock < blinkUntil ? .blink : .closed)
-        place(head, pictures.head[turn]![bill]!, at: local(CGPoint(x: neck.x, y: neck.y * breath + dy)))
+        place(head, pictures.head[turn]![bill]!, at: local(CGPoint(x: neck.x, y: neck.y - breath + dy)))
         let flip: CGFloat = headBack ? -1 : 1
-        head.transform = CATransform3DRotate(CATransform3DMakeScale(flip, 1, 1), -(headAngle + nibble) * flip + shake, 0, 0, 1)
+        let angle = -(headAngle + nibble) * flip + shake
+        // Held still and level, the head is shown pixel for pixel.
+        head.transform = abs(angle) < 0.02 ? CATransform3DMakeScale(flip, 1, 1)
+            : CATransform3DRotate(CATransform3DMakeScale(flip, 1, 1), angle, 0, 0, 1)
     }
 
     /// Shows `picture` on `layer` with its anchor at `point`.
