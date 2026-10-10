@@ -42,7 +42,18 @@ final class Line: ObservableObject {
     /// Card frames in window coordinates, reported by the views. The panel
     /// uses them to only catch clicks over photos and let the rest through.
     var hitRects: [UUID: CGRect] = [:] {
-        didSet { if hitRects != oldValue { onHitRectsChange?() } }
+        didSet { if hitRects != oldValue { hitRectsChanged() } }
+    }
+    /// While the line slides down or a photo moves, every card reports on
+    /// each frame: the panel looks again once, after all of them.
+    private var hitRectsChangePending = false
+    private func hitRectsChanged() {
+        guard !hitRectsChangePending else { return }
+        hitRectsChangePending = true
+        DispatchQueue.main.async { [weak self] in
+            self?.hitRectsChangePending = false
+            self?.onHitRectsChange?()
+        }
     }
     /// Lets the panel decide again whether to catch the mouse when a photo
     /// appears or moves under a pointer that is standing still.

@@ -64,7 +64,8 @@ final class LockScreen {
             .store(in: &cancellables)
         // A crash or a quit while locked leaves the still up: put the real picture back.
         if !Self.screenIsLocked { restore() }
-        export()
+        // Not at launch itself, which it would hold up: a moment later, at rest.
+        scheduleExport()
 
         let distributed = DistributedNotificationCenter.default()
         let workspace = NSWorkspace.shared.notificationCenter
@@ -104,15 +105,27 @@ final class LockScreen {
     // MARK: Keeping the pictures current
 
     /// Called whenever the line changes. Drawing waits for things to settle.
-    func scheduleExport() {
+    func scheduleExport(after delay: TimeInterval = 1.5) {
         pendingExport?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            self?.pendingExport = nil
-            self?.export()
+            guard let self else { return }
+            // Drawn while the mouse and the keyboard rest, so it never holds
+            // up anything under your hand. Locking draws it at once if it
+            // is still waiting.
+            let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState,
+                                                               eventType: CGEventType(rawValue: ~0)!)
+            if idle < Self.restBeforeDrawing {
+                self.scheduleExport(after: Self.restBeforeDrawing - idle + 0.05)
+                return
+            }
+            self.pendingExport = nil
+            self.export()
         }
         pendingExport = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
+
+    private static let restBeforeDrawing: TimeInterval = 2
 
     /// Draws the line over a clear screen for the screen saver, and over a
     /// frame of the desktop picture for the password prompt, so locking has
