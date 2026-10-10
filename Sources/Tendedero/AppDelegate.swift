@@ -376,6 +376,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             pinned = false
             peekUntil = .distantPast
             panel.ignoresMouseEvents = true
+            line.hoveredID = nil
         }
     }
 
@@ -594,7 +595,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !GrabView.isDragging, line.slidingID == nil, NSEvent.pressedMouseButtons == 0 else { return }
         let local = panel.convertPoint(fromScreen: mouse)
         let flipped = CGPoint(x: local.x, y: panel.frame.height - local.y)
-        let overPhoto = line.hitRects.values.contains { $0.insetBy(dx: -4, dy: -4).contains(flipped) }
+        let hovered = line.photo(at: flipped, slack: 4)
+        if line.hoveredID != hovered { line.hoveredID = hovered }
+        let overPhoto = hovered != nil
         if panel.ignoresMouseEvents == overPhoto {
             panel.ignoresMouseEvents = !overPhoto
         }

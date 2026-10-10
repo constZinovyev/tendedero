@@ -12,8 +12,8 @@ import SwiftUI
 /// Dragged sideways, the photo slides along the line to any spot instead.
 /// Pulling it down off the line turns the slide into a drag out.
 ///
-/// A click, single or double, brings it to the front; press and hold opens
-/// Markup, the corner cross discards; Show and Copy are in its menu.
+/// A click brings it to the front, a double click shows it large, press and
+/// hold opens Markup, the corner cross discards, Copy is in its menu.
 /// Whatever you click or slide comes to the front.
 struct GrabArea: NSViewRepresentable {
     let item: Pegged
@@ -35,6 +35,7 @@ struct GrabArea: NSViewRepresentable {
         view.url = item.url
         view.dragImage = item.thumb
         view.onClick = { line.bringToFront(id) }
+        view.onDoubleClick = { line.show(id) }
         view.onSlideStart = { line.beginSlide(id) }
         view.onSlide = { dx in line.slide(id, by: dx) }
         view.onSlideEnd = { line.endSlide() }
@@ -81,6 +82,7 @@ final class GrabView: NSView, NSDraggingSource {
     var url: URL?
     var dragImage: NSImage?
     var onClick: () -> Void = {}
+    var onDoubleClick: () -> Void = {}
     var onSlideStart: () -> Void = {}
     var onSlide: (CGFloat) -> Void = { _ in }
     var onSlideEnd: () -> Void = {}
@@ -123,6 +125,14 @@ final class GrabView: NSView, NSDraggingSource {
         if isInCross(event) {
             downPoint = nil
             onDiscard()
+            return
+        }
+        // The first click has already brought the photo to the front. The
+        // second may reach a view SwiftUI rebuilt for it, but macOS counts
+        // the clicks, not the view, so it still arrives as the second.
+        if event.clickCount == 2 {
+            downPoint = nil
+            onDoubleClick()
             return
         }
         downPoint = event.locationInWindow

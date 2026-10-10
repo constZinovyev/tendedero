@@ -48,6 +48,25 @@ final class Line: ObservableObject {
     /// appears or moves under a pointer that is standing still.
     var onHitRectsChange: (() -> Void)?
 
+    /// The photo under the pointer, set by the panel as the pointer moves.
+    /// SwiftUI's own hover only hears of the pointer once the panel catches
+    /// the mouse, a move too late: a pointer that came to rest on a photo
+    /// in one quick move left it unlit.
+    @Published var hoveredID: UUID?
+
+    /// The photo drawn at `p`, in the panel's coordinates with y down: the
+    /// front one where photos overlap, as it swings and dips with the rope.
+    /// `slack` widens each card by that much.
+    func photo(at p: CGPoint, slack: CGFloat) -> UUID? {
+        for item in items.reversed() where !item.falling {
+            guard let rect = hitRects[item.id] else { continue }
+            // The photo turns about the top of its clothespin.
+            let pin = CGPoint(x: rect.midX, y: rect.minY - PeggedView.cardOffsetBelowTop)
+            if rect.insetBy(dx: -slack, dy: -slack).contains(sway(item.id).atRest(p, pin: pin)) { return item.id }
+        }
+        return nil
+    }
+
     /// Each photo's swing, played by Core Animation.
     private var sways: [UUID: Sway] = [:]
     func sway(_ id: UUID) -> Sway {

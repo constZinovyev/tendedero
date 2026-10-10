@@ -101,7 +101,20 @@ final class Sway {
     /// The rope under the pin has gone down by `points`: the photo goes
     /// down with it.
     func lower(_ points: CGFloat) {
+        lowered = points
         view?.lower(points)
+    }
+
+    /// How far the rope has taken the photo down.
+    private(set) var lowered: CGFloat = 0
+
+    /// Where a point over the photo as it is drawn now, swung about `pin`
+    /// and taken down by the rope, falls on the photo at rest. Y down.
+    func atRest(_ p: CGPoint, pin: CGPoint) -> CGPoint {
+        let a = angle * .pi / 180
+        let dx = p.x - pin.x, dy = p.y - pin.y
+        return CGPoint(x: pin.x + cos(a) * dx + sin(a) * dy,
+                       y: pin.y - sin(a) * dx + cos(a) * dy - lowered)
     }
 
     private func play(_ curve: [Double], hold: Bool = false) {
@@ -204,6 +217,18 @@ final class SwayView: NSView {
     }
 
     // MARK: Where the card is
+
+    /// AppKit finds the view under a click by the frames, which stay put
+    /// while Core Animation swings the photo. The point is turned back to
+    /// where it falls on the photo at rest, so a click lands on the photo
+    /// as it is drawn.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let superview else { return super.hitTest(point) }
+        let local = convert(point, from: superview)
+        let q = line.sway(id).atRest(CGPoint(x: local.x, y: bounds.height - local.y),
+                                     pin: CGPoint(x: bounds.midX, y: 0))
+        return super.hitTest(convert(NSPoint(x: q.x, y: bounds.height - q.y), to: superview))
+    }
 
     private func cardMoved(_ rects: [UUID: CGRect]) {
         cardRect = rects[id]

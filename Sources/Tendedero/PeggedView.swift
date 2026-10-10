@@ -7,13 +7,13 @@ struct PeggedView: View {
     @ObservedObject var line: Line
 
     @State private var arrived = false
-    @State private var hovering = false
     @State private var slideTick = 0
 
     private var copied: Bool { line.copiedID == item.id }
     private var dragging: Bool { line.draggingID == item.id }
     private var pressed: Bool { line.pressedID == item.id }
     private var sliding: Bool { line.slidingID == item.id }
+    private var hovering: Bool { line.hoveredID == item.id }
 
     var body: some View {
         VStack(spacing: -12) {
@@ -105,7 +105,6 @@ struct PeggedView: View {
             }
             .animation(.easeOut(duration: 0.18), value: hovering)
             .animation(.easeOut(duration: 0.2), value: copied)
-            .onHover { hovering = $0 }
             .background(
                 GeometryReader { g in
                     Color.clear.preference(key: HitRectsKey.self,
