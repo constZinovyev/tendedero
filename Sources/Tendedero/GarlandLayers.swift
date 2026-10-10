@@ -367,25 +367,46 @@ final class GarlandLayers {
             let kick = Double(v.dx / max(speed, 1)) * 14 * strength * blowing
             guard abs(kick) > 0.05 else { continue }
             let curve = Self.pendulum(angle: s.angle, velocity: s.velocity + kick)
-            let delay = Double(d) / 2200
-            swings[i].curve = curve
-            swings[i].start = now + delay
-            swings[i].pushed = now
-            let a = CAKeyframeAnimation(keyPath: "transform.rotation.z")
-            a.values = curve
-            a.calculationMode = .cubic
-            a.duration = BulbSwing.step * Double(curve.count - 1)
-            a.beginTime = now + delay
-            // Keep the current lean until the air arrives.
-            a.fillMode = .backwards
-            if #available(macOS 12.0, *) {
-                a.preferredFrameRateRange = CAFrameRateRange(minimum: 24, maximum: 30, preferred: 30)
-            }
-            s.off.add(a, forKey: "swing")
-            s.lit?.add(a, forKey: "swing")
-            until = max(until, now + delay + a.duration)
+            until = max(until, swing(i, curve, at: now, delay: Double(d) / 2200))
         }
         if until > 0 { unflatten(until: until) }
+    }
+
+    /// Plays `curve` on bulb `i`, starting `delay` after `now`, and returns
+    /// when it ends.
+    private func swing(_ i: Int, _ curve: [Double], at now: CFTimeInterval, delay: Double) -> CFTimeInterval {
+        let s = swings[i]
+        swings[i].curve = curve
+        swings[i].start = now + delay
+        swings[i].pushed = now
+        let a = CAKeyframeAnimation(keyPath: "transform.rotation.z")
+        a.values = curve
+        a.calculationMode = .cubic
+        a.duration = BulbSwing.step * Double(curve.count - 1)
+        a.beginTime = now + delay
+        // Keep the current lean until the air arrives.
+        a.fillMode = .backwards
+        if #available(macOS 12.0, *) {
+            a.preferredFrameRateRange = CAFrameRateRange(minimum: 24, maximum: 30, preferred: 30)
+        }
+        s.off.add(a, forKey: "swing")
+        s.lit?.add(a, forKey: "swing")
+        return now + delay + a.duration
+    }
+
+    /// The pointer resting on bulb `i`: it starts to sway a little by
+    /// itself and keeps swaying gently for as long as the pointer is there,
+    /// each touch in time with the swing, like a hand on a swing.
+    func touch(bulb i: Int) {
+        guard i < swings.count, root.superlayer?.speed != 0 else { return }
+        let s = swings[i]
+        let a = s.angle, w = s.velocity
+        // How far it swings now, from where it is and how fast it goes.
+        let reach = (a * a + w * w / 22).squareRoot()
+        let now = CACurrentMediaTime()
+        guard reach < 0.1, now - s.pushed > 0.28 else { return }
+        let dir: Double = abs(w) > 0.05 ? (w > 0 ? 1 : -1) : (Bool.random() ? 1 : -1)
+        unflatten(until: swing(i, Self.pendulum(angle: a, velocity: w + dir * 0.28), at: now, delay: 0))
     }
 
     /// A small pendulum set going from `angle` at `velocity`: it carries

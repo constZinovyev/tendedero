@@ -109,6 +109,29 @@ final class GarlandController {
             window.decorView.setPaused(!window.occlusionState.contains(.visible))
             window.decorView.feelAir(at: p, velocity: velocity)
         }
+        touchBulbs()
+    }
+
+    /// While the pointer rests on a bulb it keeps that bulb gently swaying,
+    /// touching it again every so often; nothing runs once it leaves.
+    private var touchTimer: Timer?
+
+    private func touchBulbs() {
+        let p = NSEvent.mouseLocation
+        var touching = false
+        for window in windows.values where window.isVisible {
+            if window.decorView.touchBulb(at: p) { touching = true }
+        }
+        if touching, touchTimer == nil {
+            let timer = Timer(timeInterval: 0.32, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.touchBulbs() }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            touchTimer = timer
+        } else if !touching {
+            touchTimer?.invalidate()
+            touchTimer = nil
+        }
     }
 
     // MARK: Birds
@@ -524,6 +547,14 @@ final class DecorView: NSView {
 
     func hits(_ p: CGPoint) -> Bool {
         target != nil || hit(p) != nil
+    }
+
+    /// The pointer on a bulb of this garland touches it. Returns whether it
+    /// is on one.
+    func touchBulb(at p: CGPoint) -> Bool {
+        guard case .garland = decor, !store.editing, target == nil, case .bulb(let i) = hit(p) else { return false }
+        garlandLayers.touch(bulb: i)
+        return true
     }
 
     func bend(at p: CGPoint, depth: CGFloat) {
