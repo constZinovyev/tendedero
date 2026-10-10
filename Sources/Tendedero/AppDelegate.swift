@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var signalSources: [DispatchSourceSignal] = []
     private var hotKeys: [HotKey] = []
     private var garlands: GarlandController!
+    private var seagulls: Seagulls!
     private var lockScreen: LockScreen!
     private var cancellables = Set<AnyCancellable>()
     /// Watching the pointer: event monitors, so nothing runs while the
@@ -81,6 +82,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setUpStatusItem()
         garlands = GarlandController()
         garlands.lineWindow = { [weak self] in self?.panel }
+        seagulls = Seagulls(line: line, decorations: garlands,
+                            linePanel: { [weak self] in self?.panel },
+                            lineRevealed: { [weak self] in self?.isRevealed ?? false })
         lockScreen = LockScreen(line: line, panel: panel, decorations: garlands.store)
         watchMenuBarClicks()
 
@@ -677,6 +681,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let garlandItem = NSMenuItem(title: L("Decorations", "Decoración"), action: nil, keyEquivalent: "")
         garlandItem.submenu = garlands.menu()
         menu.addItem(garlandItem)
+
+        let gullItem = NSMenuItem(title: L("Seagulls", "Gaviotas"), action: nil, keyEquivalent: "")
+        gullItem.submenu = seagulls.menu()
+        menu.addItem(gullItem)
 
         let login = ClosureMenuItem(L("Open at login", "Abrir al iniciar sesión")) {
             AppDelegate.toggleLaunchAtLogin()

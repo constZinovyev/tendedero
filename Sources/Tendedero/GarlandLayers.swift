@@ -86,6 +86,23 @@ final class GarlandLayers {
     private var groups: [CALayer] = []
     private var reach: CGFloat = 80
     private var flattenTimer: Timer?
+    /// The wire and the bulbs on it, so a bird sitting on it can bend it.
+    private var wire: Wire?
+
+    private struct Wire {
+        let points: [CGPoint]
+        let normals: [CGVector]
+        let lengths: [CGFloat]
+        let amplitude: CGFloat
+        let pitch: CGFloat
+        /// Each strand: its dark stroke and its highlight.
+        let strands: [(CAShapeLayer, CAShapeLayer)]
+        let fixed: CALayer
+        /// Each bulb's holders, where they hang at rest, and how far along
+        /// the wire they are.
+        let bulbs: [(holders: [CALayer], rest: CGPoint, along: CGFloat)]
+        var bent = false
+    }
 
     init() {
         root.masksToBounds = false
@@ -104,6 +121,7 @@ final class GarlandLayers {
         root.sublayers?.forEach { $0.removeFromSuperlayer() }
         swings = []
         groups = []
+        wire = nil
         reach = max(80, style.bulbSize * 14)
         // One shared start time keeps every blinking garland in step.
         let now = CACurrentMediaTime()
@@ -130,24 +148,26 @@ final class GarlandLayers {
         // The wire: strands twisted around the curve.
         let strands = max(1, style.strands)
         let amplitude = strands > 1 ? style.wireWidth * 0.9 : 0
+        let normals = local.indices.map { geo.normal(at: $0) }
+        var strandLayers: [(CAShapeLayer, CAShapeLayer)] = []
         for k in 0..<strands {
-            let path = CGMutablePath()
-            for (i, p) in local.enumerated() {
-                let n = geo.normal(at: i)
-                let o = amplitude * sin(2 * .pi * geo.lengths[i] / max(style.twistPitch, 2) + CGFloat(k) * 2 * .pi / CGFloat(strands))
-                let q = CGPoint(x: p.x + n.dx * o, y: p.y + n.dy * o)
-                if i == 0 { path.move(to: q) } else { path.addLine(to: q) }
-            }
-            fixed.addSublayer(stroke(path, color: ink, width: style.wireWidth, cap: .round))
-            fixed.addSublayer(stroke(path, color: NSColor(white: 1, alpha: 0.14).cgColor,
-                                         width: max(0.3, style.wireWidth * 0.3)))
+            let path = Self.strand(k, of: strands, points: local, normals: normals, lengths: geo.lengths,
+                                   amplitude: amplitude, pitch: style.twistPitch) { _ in 0 }
+            let dark = stroke(path, color: ink, width: style.wireWidth, cap: .round)
+            let shine = stroke(path, color: NSColor(white: 1, alpha: 0.14).cgColor,
+                               width: max(0.3, style.wireWidth * 0.3))
+            fixed.addSublayer(dark)
+            fixed.addSublayer(shine)
+            strandLayers.append((dark, shine))
         }
+        var wireBulbs: [(holders: [CALayer], rest: CGPoint, along: CGFloat)] = []
 
         // The bulbs, each hanging on its lead from a point on the wire,
         // in a holder that can swing about that point.
         let dark = CALayer()
         dark.frame = root.bounds
-        let positions = geo.bulbPositions(spacing: g.spacing).map { CGPoint(x: $0.x - origin.x, y: $0.y - origin.y) }
+        let indices = geo.bulbIndices(spacing: g.spacing)
+        let positions = indices.map { local[$0] }
         for (i, p) in positions.enumerated() {
             let off = holder(bulbs.off, rect: bulbs.rect, wire: p, lead: style.lead,
                              leadWidth: max(0.6, style.wireWidth * 0.6), ink: ink)
@@ -160,7 +180,10 @@ final class GarlandLayers {
                 lit = l
             }
             swings.append(BulbSwing(center: CGPoint(x: p.x, y: p.y - style.lightDrop), off: off, lit: lit))
+            wireBulbs.append(([off] + (lit.map { [$0] } ?? []), off.position, geo.lengths[indices[i]]))
         }
+        wire = Wire(points: local, normals: normals, lengths: geo.lengths, amplitude: amplitude,
+                    pitch: style.twistPitch, strands: strandLayers, fixed: fixed, bulbs: wireBulbs)
         dark.shouldRasterize = true
         dark.rasterizationScale = scale
         groups.append(dark)
@@ -223,6 +246,61 @@ final class GarlandLayers {
         holder.shouldRasterize = true
         holder.rasterizationScale = scale
         return holder
+    }
+
+    // MARK: A bird on the wire
+
+    /// One strand of the wire, twisted around the curve, each point lowered
+    /// by `drop` of its distance along the wire.
+    private static func strand(_ k: Int, of strands: Int, points: [CGPoint], normals: [CGVector], lengths: [CGFloat],
+                               amplitude: CGFloat, pitch: CGFloat, drop: (CGFloat) -> CGFloat) -> CGPath {
+        let path = CGMutablePath()
+        for (i, p) in points.enumerated() {
+            let n = normals[i]
+            let o = amplitude * sin(2 * .pi * lengths[i] / max(pitch, 2) + CGFloat(k) * 2 * .pi / CGFloat(strands))
+            let q = CGPoint(x: p.x + n.dx * o, y: p.y + n.dy * o - drop(lengths[i]))
+            if i == 0 { path.move(to: q) } else { path.addLine(to: q) }
+        }
+        return path
+    }
+
+    /// A weight on the wire at `p` (this layer's coordinates) pulls it
+    /// `depth` points down there: like any taut string under a point load,
+    /// it runs straight from each end to the weight, and the bulbs go down
+    /// with it. A depth of zero puts it back as drawn and caches it again.
+    func bend(at p: CGPoint, depth: CGFloat) {
+        guard var wire, let total = wire.lengths.last, total > 0 else { return }
+        let bent = abs(depth) > 0.05
+        guard bent || wire.bent else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        var nearest = 0, best = CGFloat.greatestFiniteMagnitude
+        for (i, q) in wire.points.enumerated() {
+            let d = hypot(q.x - p.x, q.y - p.y)
+            if d < best { best = d; nearest = i }
+        }
+        let at = min(max(wire.lengths[nearest], 1), total - 1)
+        let drop: (CGFloat) -> CGFloat = { s in
+            guard bent else { return 0 }
+            return depth * (s < at ? s / at : (total - s) / (total - at))
+        }
+        let strands = wire.strands.count
+        for (k, layers) in wire.strands.enumerated() {
+            let path = Self.strand(k, of: strands, points: wire.points, normals: wire.normals, lengths: wire.lengths,
+                                   amplitude: wire.amplitude, pitch: wire.pitch, drop: drop)
+            layers.0.path = path
+            layers.1.path = path
+        }
+        for bulb in wire.bulbs {
+            let q = CGPoint(x: bulb.rest.x, y: bulb.rest.y - drop(bulb.along))
+            for h in bulb.holders { h.position = bent ? q : bulb.rest }
+        }
+        // While it moves the wire is drawn as it is; still, it is cached.
+        wire.fixed.shouldRasterize = !bent
+        wire.bent = bent
+        self.wire = wire
+        if bent { unflatten(until: CACurrentMediaTime() + 0.2) }
     }
 
     // MARK: Air from the pointer

@@ -304,6 +304,32 @@ final class Line: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([item.url])
     }
 
+    // MARK: A bird on the line
+
+    /// The rope as the panel draws it, so a bird sitting on it can bend it.
+    let rope = RopeBend()
+
+    /// A weight on the rope `x` points from its left end pulls it `depth`
+    /// points down there, and the photos hanging nearby go down with it.
+    /// A depth of zero straightens it.
+    func bendRope(at x: CGFloat, depth: CGFloat) {
+        rope.set(x: x, depth: depth)
+        for item in items where !item.falling {
+            let pin = CGFloat(item.position) * width
+            sway(item.id).lower(RopeBend.drop(at: pin, load: x, depth: depth, width: width))
+        }
+    }
+
+    /// A jolt on the rope near `x`: the photos close by swing a little.
+    func jolt(at x: CGFloat, strength: Double) {
+        for item in items where !item.falling && item.id != draggingID && item.id != slidingID {
+            let d = abs(CGFloat(item.position) * width - x)
+            guard d < 260 else { continue }
+            let near = Double(1 - d / 260)
+            sway(item.id).nudge((Bool.random() ? 1 : -1) * strength * near * .random(in: 0.6...1))
+        }
+    }
+
     // MARK: Breeze
 
     /// Every so often a little wind moves the line. It is the detail that

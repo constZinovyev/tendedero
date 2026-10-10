@@ -124,13 +124,18 @@ struct GarlandGeometry {
     /// One bulb every `spacing`, starting half a step in so the string looks
     /// even at both ends.
     func bulbPositions(spacing: CGFloat) -> [CGPoint] {
+        bulbIndices(spacing: spacing).map { points[$0] }
+    }
+
+    /// The samples the bulbs hang from, in order along the wire.
+    func bulbIndices(spacing: CGFloat) -> [Int] {
         guard length > 0, spacing > 0 else { return [] }
-        var result: [CGPoint] = []
+        var result: [Int] = []
         var j = 0
         var d = spacing / 2
         while d < length {
             while j < lengths.count - 1 && lengths[j] < d { j += 1 }
-            result.append(points[j])
+            result.append(j)
             d += spacing
         }
         return result

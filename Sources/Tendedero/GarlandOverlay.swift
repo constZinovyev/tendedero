@@ -109,6 +109,37 @@ final class GarlandController {
         }
     }
 
+    // MARK: Birds
+
+    /// Air moving past the decorations from anything but the pointer: a
+    /// bird's wings. `p` is in screen coordinates.
+    func feelAir(at p: CGPoint, velocity: CGVector) {
+        for window in windows.values where window.isVisible {
+            window.decorView.feelAir(at: p, velocity: velocity)
+        }
+    }
+
+    /// The garland wires on show, in screen coordinates, for a bird to sit on.
+    func wires() -> [(id: UUID, points: [CGPoint])] {
+        guard !store.editing else { return [] }
+        return store.items.compactMap { g in
+            guard windows[.garland(g.id)]?.isVisible == true else { return nil }
+            return (g.id, GarlandGeometry(g).points)
+        }
+    }
+
+    /// The top of the candle flames, if the candles are on show.
+    var candleTop: CGPoint? {
+        guard let set = store.candles, windows[.candles]?.isVisible == true else { return nil }
+        let r = store.candleStyle.bounds(at: set.position)
+        return CGPoint(x: r.midX, y: r.maxY)
+    }
+
+    /// A bird on a garland's wire at `p` (screen coordinates) pulls it down.
+    func bend(_ id: UUID, at p: CGPoint, depth: CGFloat) {
+        windows[.garland(id)]?.decorView.bend(at: p, depth: depth)
+    }
+
     func toggleEditing() {
         store.editing.toggle()
     }
@@ -491,6 +522,11 @@ final class DecorView: NSView {
 
     func hits(_ p: CGPoint) -> Bool {
         target != nil || hit(p) != nil
+    }
+
+    func bend(at p: CGPoint, depth: CGFloat) {
+        guard let window else { return }
+        garlandLayers.bend(at: CGPoint(x: p.x - window.frame.minX, y: p.y - window.frame.minY), depth: depth)
     }
 
     /// The pointer moving past the candles stirs the air around them.

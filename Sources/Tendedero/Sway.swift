@@ -51,6 +51,12 @@ final class Sway {
         spring(from: angle, stiffness: 38, damping: 2.4)
     }
 
+    /// The rope under the pin has gone down by `points`: the photo goes
+    /// down with it.
+    func lower(_ points: CGFloat) {
+        view?.lower(points)
+    }
+
     private func play(_ curve: [Double], hold: Bool = false) {
         samples = curve
         start = CACurrentMediaTime()
@@ -201,6 +207,15 @@ final class SwayView: NSView {
     }
 
     // MARK: Swinging
+
+    /// Moves the photo down with the rope, apart from its swing.
+    func lower(_ points: CGFloat) {
+        guard let layer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.sublayerTransform = points == 0 ? CATransform3DIdentity : CATransform3DMakeTranslation(0, -points, 0)
+        CATransaction.commit()
+    }
 
     /// Turns the view about the middle of its top edge, where the pin is.
     func play(_ degrees: [Double], step: Double, hold: Bool) {

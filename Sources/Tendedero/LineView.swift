@@ -31,7 +31,8 @@ struct LineView: View {
         GeometryReader { geo in
             let width = geo.size.width
             ZStack(alignment: .topLeading) {
-                Rope(width: width)
+                RopeHost(bend: line.rope)
+                    .frame(width: width, height: Layout.panelHeight)
 
                 if line.items.isEmpty {
                     Hint()
@@ -105,6 +106,141 @@ struct Rope: View {
             ], startPoint: .leading, endPoint: .trailing)
         )
         .allowsHitTesting(false)
+    }
+}
+
+/// The live line's rope: the same as Rope, drawn by Core Animation so a
+/// bird sitting on it can pull it down.
+@MainActor
+final class RopeBend {
+    fileprivate weak var view: RopeView?
+    fileprivate(set) var x: CGFloat = 0
+    fileprivate(set) var depth: CGFloat = 0
+
+    func set(x: CGFloat, depth: CGFloat) {
+        guard x != self.x || depth != self.depth else { return }
+        self.x = x
+        self.depth = depth
+        view?.redraw()
+    }
+
+    /// Where the rope runs beyond each edge of the screen.
+    static let overhang: CGFloat = 20
+
+    /// How far below its rest the rope is at `px` with `depth` at `load`:
+    /// a taut rope under a point weight runs straight from each end to it.
+    static func drop(at px: CGFloat, load: CGFloat, depth: CGFloat, width: CGFloat) -> CGFloat {
+        let a = -overhang, b = width + overhang
+        guard depth != 0, load > a, load < b, px > a, px < b else { return 0 }
+        return depth * (px < load ? (px - a) / (load - a) : (b - px) / (b - load))
+    }
+
+    /// The rope at rest at `px`, from the top of the panel, y down.
+    static func restY(at px: CGFloat, width: CGFloat) -> CGFloat {
+        let t = (px + overhang) / (width + overhang * 2)
+        return Layout.ropeTop + 4 * Layout.sag(width: width) * t * (1 - t)
+    }
+}
+
+struct RopeHost: NSViewRepresentable {
+    let bend: RopeBend
+
+    func makeNSView(context: Context) -> RopeView {
+        let view = RopeView()
+        bend.view = view
+        view.bend = bend
+        return view
+    }
+
+    func updateNSView(_ view: RopeView, context: Context) {
+        bend.view = view
+        view.bend = bend
+        view.redraw()
+    }
+}
+
+@MainActor
+final class RopeView: NSView {
+    weak var bend: RopeBend?
+    private let ropeLayers: CALayer = CALayer()
+    private let shade = CAShapeLayer(), core = CAShapeLayer(), shine = CAShapeLayer()
+    private let fade = CAGradientLayer()
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        // Like Rope: a soft shadow, a mid gray core and a faint highlight.
+        for (l, color, w) in [(shade, NSColor.black.withAlphaComponent(0.16), 2.2),
+                              (core, NSColor(white: 0.55, alpha: 1), 1.2),
+                              (shine, NSColor.white.withAlphaComponent(0.45), 0.4)] as [(CAShapeLayer, NSColor, CGFloat)] {
+            l.fillColor = nil
+            l.strokeColor = color.cgColor
+            l.lineWidth = w
+            l.lineJoin = .round
+            ropeLayers.addSublayer(l)
+        }
+        shade.shadowColor = NSColor.black.cgColor
+        shade.shadowOpacity = 0.25
+        shade.shadowRadius = 1
+        shade.shadowOffset = .zero
+        // It fades out at both ends, as if it came from beyond the screen.
+        fade.startPoint = CGPoint(x: 0, y: 0.5)
+        fade.endPoint = CGPoint(x: 1, y: 0.5)
+        fade.colors = [NSColor.clear.cgColor, NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
+        fade.locations = [0, 0.08, 0.92, 1]
+        ropeLayers.mask = fade
+        layer?.addSublayer(ropeLayers)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func layout() {
+        super.layout()
+        redraw()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        let scale = window?.backingScaleFactor ?? 2
+        for l in [shade, core, shine] { l.contentsScale = scale }
+    }
+
+    /// Draws the rope as it hangs now. This view's layer has y up.
+    func redraw() {
+        let w = bounds.width, h = bounds.height
+        guard w > 0 else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        ropeLayers.frame = bounds
+        fade.frame = bounds
+        let load = bend?.x ?? 0, depth = bend?.depth ?? 0
+        func y(_ px: CGFloat) -> CGFloat {
+            h - RopeBend.restY(at: px, width: w) - RopeBend.drop(at: px, load: load, depth: depth, width: w)
+        }
+        let path = CGMutablePath()
+        let a = -RopeBend.overhang, b = w + RopeBend.overhang
+        if depth == 0 {
+            path.move(to: CGPoint(x: a, y: y(a)))
+            path.addQuadCurve(to: CGPoint(x: b, y: y(b)),
+                              control: CGPoint(x: w / 2, y: h - Layout.ropeTop - 2 * Layout.sag(width: w)))
+        } else {
+            let n = 160
+            var xs = (0...n).map { a + (b - a) * CGFloat($0) / CGFloat(n) }
+            xs.append(load)
+            xs.sort()
+            for (i, px) in xs.enumerated() {
+                let p = CGPoint(x: px, y: y(px))
+                if i == 0 { path.move(to: p) } else { path.addLine(to: p) }
+            }
+        }
+        var down = CGAffineTransform(translationX: 0, y: -1.2)
+        shade.path = path.copy(using: &down)
+        core.path = path
+        var up = CGAffineTransform(translationX: 0, y: 0.35)
+        shine.path = path.copy(using: &up)
     }
 }
 
