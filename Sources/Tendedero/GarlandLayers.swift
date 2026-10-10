@@ -280,16 +280,16 @@ final class GarlandLayers {
             // Air pushes like drag: with the square of the hand's speed,
             // for as long as it blows on the bulb. A slow hand barely stirs
             // it; a quick sweep sets it going.
-            let strength = min(7, pow(Double(speed) / 650, 2)) * Double(near)
+            let strength = min(7, pow(Double(speed) / 580, 2)) * Double(near)
             let blowing = min(0.1, now - s.pushed)
             // It gives the bulb speed, not a new angle: air moving right
             // pushes its bottom right, which with the pivot above is a
             // counter-clockwise turn, positive. Pushes in time with the
             // swing add up, as on a swing.
-            let kick = Double(v.dx / max(speed, 1)) * 12 * strength * blowing
+            let kick = Double(v.dx / max(speed, 1)) * 14 * strength * blowing
             guard abs(kick) > 0.05 else { continue }
             let curve = Self.pendulum(angle: s.angle, velocity: s.velocity + kick)
-            let delay = Double(d) / 1500
+            let delay = Double(d) / 2200
             swings[i].curve = curve
             swings[i].start = now + delay
             swings[i].pushed = now
@@ -311,11 +311,11 @@ final class GarlandLayers {
     }
 
     /// A small pendulum set going from `angle` at `velocity`: it carries
-    /// on by its own inertia, about a second and a half to and fro, dying
+    /// on by its own inertia, about 1.3 seconds to and fro, dying
     /// away slowly. Worked out once, in small steps, until it is still.
     /// The swing never goes past about 45 degrees.
     private static func pendulum(angle a0: Double, velocity w0: Double) -> [Double] {
-        let k = 17.0, c = 0.75, limit = 0.8
+        let k = 22.0, c = 0.8, limit = 0.8
         let step = BulbSwing.step, sub = 8, dt = step / Double(sub)
         var a = a0, w = w0
         var curve = [a]
