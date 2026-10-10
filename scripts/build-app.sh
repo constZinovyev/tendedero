@@ -76,12 +76,14 @@ PLIST
 # Signing" keeps the app the same app from build to build, so macOS keeps
 # its permissions, like access to the Desktop. Without either, sign ad hoc
 # so the app still runs locally; macOS then asks again after each build.
+# (grep reads all of the list: with -q it would stop at the match, and
+# under pipefail the cut-off security command would fail the test.)
 IDENTITY="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Developer ID Application/{print $2; exit}')}"
 LOCAL_IDENTITY="Tendedero Local Signing"
 if [ -n "$IDENTITY" ]; then
   codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
   echo "Signed with $IDENTITY"
-elif security find-identity -p codesigning 2>/dev/null | grep -q "\"$LOCAL_IDENTITY\""; then
+elif security find-identity -p codesigning 2>/dev/null | grep -F "\"$LOCAL_IDENTITY\"" >/dev/null; then
   codesign --force --deep --sign "$LOCAL_IDENTITY" "$APP" >/dev/null
   echo "Signed with $LOCAL_IDENTITY"
 else
