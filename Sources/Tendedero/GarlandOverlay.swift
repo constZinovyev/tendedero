@@ -144,18 +144,18 @@ final class GarlandController {
     private var fishTimer: Timer?
     /// Told when a fish has been hung, so a gull can come for it.
     var onFish: (() -> Void)?
-    private static let maxFish = 4
+    private static let maxFish = 2
 
     private var fishCount: Int { fish.values.reduce(0) { $0 + $1.count } }
 
-    /// A fish every one to two and a half minutes, while fewer than three
-    /// hang: more often than the gulls come, so they find some waiting.
+    /// A fish every one to two and a half minutes, at most two hanging:
+    /// more often than the gulls come, so they find some waiting.
     private func scheduleFish() {
         fishTimer?.invalidate()
         let t = Timer(timeInterval: .random(in: 60...150), repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                if self.fishCount < 3 { _ = self.hangFish() }
+                self.hangFish()
                 self.scheduleFish()
             }
         }
