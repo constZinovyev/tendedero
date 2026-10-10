@@ -3,10 +3,13 @@ import QuartzCore
 
 // MARK: - Pictures
 
-/// The seagull, a herring gull seen from the side and facing right, drawn
-/// once per display scale: a dozen moments of a wingbeat, with legs tucked
-/// and let down, a glide, and a few standing poses. A visit only swaps
-/// these pictures and moves one layer.
+/// The seagull, an adult herring gull facing right, drawn once per display
+/// scale: white with a soft light from above and the belly in shade, a pale
+/// gray back, black wingtips with white spots, a yellow bill with its red
+/// spot. In flight it is seen from three heights, from the side and above
+/// down to from below, where it shows its white underside; standing, in
+/// profile or turned towards you. A visit only swaps these pictures and
+/// moves one layer.
 @MainActor
 final class GullPictures {
     struct Picture {
@@ -15,20 +18,45 @@ final class GullPictures {
         let rect: CGRect
     }
 
-    /// The bird's size: 1 is about 50 points from tail to bill.
-    static let size: CGFloat = 0.8
+    /// The bird's size: 1 is about 47 points from tail to bill.
+    static let size: CGFloat = 1.2
     /// The body's middle in flight is this far above the feet.
     static let lift: CGFloat = 15 * size
+    /// Moments in one wingbeat.
+    static let phases = 10
 
-    let flap: [Picture]
+    /// The heights it is seen from in flight: a little from above, about
+    /// level, and from below.
+    enum View: Int, CaseIterable {
+        case above, level, below
+        var camera: Camera {
+            switch self {
+            case .above: Camera(yaw: 0.5, rise: 0.42)
+            case .level: Camera(yaw: 0.36, rise: 0.06)
+            case .below: Camera(yaw: 0.24, rise: -0.6)
+            }
+        }
+    }
+
+    struct Camera {
+        /// How much of the near side is turned towards us.
+        let yaw: CGFloat
+        /// How far above the bird we are, negative below it.
+        let rise: CGFloat
+    }
+
+    let flap: [View: [Picture]]
     let flapLegs: [Picture]
-    let glide: Picture
+    let glide: [View: Picture]
     let glideLegs: Picture
     let stand: [Pose: Picture]
+    /// Standing turned three-quarters towards you.
+    let turned: [Pose: Picture]
     let walk: [Picture]
 
     enum Pose: CaseIterable {
         case idle, blink, lookUp, lookDown, lookBack, squawk, preenA, preenB, crouch
+        static let turnable: [Pose] = [.idle, .blink, .lookUp, .lookDown, .squawk]
     }
 
     private static var cache: [CGFloat: GullPictures] = [:]
@@ -40,38 +68,51 @@ final class GullPictures {
         return p
     }
 
+    /// The pictures take a few megabytes; between visits they are let go.
+    static func forget() { cache = [:] }
+
     private init(scale: CGFloat) {
         let k = Self.size
-        let flightRect = CGRect(x: -46, y: -52, width: 80, height: 102).scaled(k)
-        let standRect = CGRect(x: -33, y: -44, width: 63, height: 50).scaled(k)
+        let flightRect = CGRect(x: -48, y: -54, width: 86, height: 106).scaled(k)
+        let standRect = CGRect(x: -34, y: -45, width: 63, height: 50).scaled(k)
         func draw(_ rect: CGRect, _ body: @escaping (CGContext) -> Void) -> Picture {
             Picture(image: Sprite.draw(rect, scale: scale) { ctx in
-                // One soft shadow under the whole bird, so the white reads on
-                // a light desktop.
-                ctx.setShadow(offset: CGSize(width: 0, height: -1.2 * scale), blur: 2.6 * scale,
-                              color: Sprite.rgba(0, 0, 0, 0.3))
+                // One soft shadow under the whole bird.
+                ctx.setShadow(offset: CGSize(width: 0, height: -1.4 * scale), blur: 3 * scale,
+                              color: Sprite.rgba(0, 0, 0, 0.28))
                 ctx.beginTransparencyLayer(auxiliaryInfo: nil)
                 ctx.scaleBy(x: k, y: k)
                 body(ctx)
                 ctx.endTransparencyLayer()
             }, rect: Sprite.aligned(rect, scale: scale))
         }
-        let phases = 12
-        flap = (0..<phases).map { i in draw(flightRect) { Self.flight($0, phase: Double(i) / Double(phases), legs: false) } }
-        flapLegs = (0..<phases).map { i in draw(flightRect) { Self.flight($0, phase: Double(i) / Double(phases), legs: true) } }
-        glide = draw(flightRect) { Self.flight($0, phase: nil, legs: false) }
-        glideLegs = draw(flightRect) { Self.flight($0, phase: nil, legs: true) }
-        var stand: [Pose: Picture] = [:]
+        let n = Self.phases
+        var flap: [View: [Picture]] = [:], glide: [View: Picture] = [:]
+        for view in View.allCases {
+            flap[view] = (0..<n).map { i in draw(flightRect) { Self.flight($0, view, phase: Double(i) / Double(n), legs: false) } }
+            glide[view] = draw(flightRect) { Self.flight($0, view, phase: nil, legs: false) }
+        }
+        self.flap = flap
+        self.glide = glide
+        flapLegs = (0..<n).map { i in draw(flightRect) { Self.flight($0, .above, phase: Double(i) / Double(n), legs: true) } }
+        glideLegs = draw(flightRect) { Self.flight($0, .above, phase: nil, legs: true) }
+        var stand: [Pose: Picture] = [:], turned: [Pose: Picture] = [:]
         for pose in Pose.allCases { stand[pose] = draw(standRect) { Self.standing($0, Self.look(pose)) } }
+        for pose in Pose.turnable {
+            var look = Self.look(pose)
+            look.turn = 1
+            turned[pose] = draw(standRect) { Self.standing($0, look) }
+        }
         self.stand = stand
+        self.turned = turned
         walk = (0..<4).map { i in
             draw(standRect) { ctx in
                 let a = Double(i) / 4 * 2 * .pi
                 var look = Look()
-                look.feet = (CGFloat(sin(a)) * 3.2, max(0, CGFloat(cos(a))) * 2.2,
-                             -CGFloat(sin(a)) * 3.2, max(0, -CGFloat(cos(a))) * 2.2)
+                look.feet = (CGFloat(sin(a)) * 3.4, max(0, CGFloat(cos(a))) * 2.4,
+                             -CGFloat(sin(a)) * 3.4, max(0, -CGFloat(cos(a))) * 2.4)
                 look.bob = -abs(CGFloat(sin(a))) * 0.8
-                look.head.x += CGFloat(sin(a)) * 0.6
+                look.head.x += CGFloat(sin(a)) * 0.7
                 Self.standing(ctx, look)
             }
         }
@@ -79,25 +120,126 @@ final class GullPictures {
 
     // MARK: Colors
 
-    private static let white = Sprite.rgba(252, 252, 250, 1)
-    private static let underside = Sprite.rgba(214, 220, 226, 1)
-    private static let edge = Sprite.rgba(74, 82, 92, 0.55)
-    private static let mantle = Sprite.rgba(170, 182, 193, 1)
-    private static let farMantle = Sprite.rgba(146, 158, 170, 1)
-    private static let underwing = Sprite.rgba(240, 242, 245, 1)
-    private static let farUnderwing = Sprite.rgba(214, 219, 224, 1)
-    private static let tip = Sprite.rgba(28, 28, 32, 1)
-    private static let beak = Sprite.rgba(246, 199, 52, 1)
-    private static let beakEdge = Sprite.rgba(186, 136, 28, 0.9)
-    private static let gonys = Sprite.rgba(214, 56, 38, 1)
-    private static let leg = Sprite.rgba(232, 168, 156, 1)
-    private static let eye = Sprite.rgba(24, 24, 26, 1)
+    private static let white = Sprite.rgba(251, 251, 249, 1)
+    private static let shade = Sprite.rgba(158, 170, 186, 1)
+    private static let rim = Sprite.rgba(104, 116, 132, 1)
+    private static let mantleDark = Sprite.rgba(146, 158, 172, 1)
+    private static let mantleLight = Sprite.rgba(180, 191, 202, 1)
+    private static let underwing = Sprite.rgba(238, 241, 245, 1)
+    private static let underwingShade = Sprite.rgba(196, 204, 215, 1)
+    private static let black = Sprite.rgba(26, 26, 30, 1)
+    private static let blackSheen = Sprite.rgba(70, 72, 80, 1)
+    private static let billBase = Sprite.rgba(246, 204, 64, 1)
+    private static let billTip = Sprite.rgba(232, 172, 34, 1)
+    private static let gonys = Sprite.rgba(214, 52, 34, 1)
+    private static let leg = Sprite.rgba(228, 164, 152, 1)
+    private static let legShade = Sprite.rgba(192, 124, 116, 1)
 
-    // MARK: Head
+    // MARK: Shared parts
 
-    /// Where the head is and how it is held, for a standing bird.
+    /// White plumage over the union of `parts`: lit from above, the lower
+    /// side in a cool shade, and a soft darker rim so it reads on a light
+    /// desktop. `shadeFrom`/`shadeTo` run from lit to shaded, y down.
+    private static func plumage(_ ctx: CGContext, _ parts: [CGPath], shadeFrom: CGFloat, shadeTo: CGFloat,
+                                depth: CGFloat = 0.6) {
+        var union = parts[0]
+        for p in parts.dropFirst() { union = union.union(p) }
+        Sprite.fill(ctx, union, white)
+        Sprite.clipped(ctx, union) {
+            Sprite.linear(ctx, from: CGPoint(x: 0, y: shadeFrom), to: CGPoint(x: 0, y: shadeTo),
+                          [(0, Sprite.rgba(255, 255, 255, 0)), (0.55, Self.alpha(shade, depth * 0.45)), (1, Self.alpha(shade, depth))])
+            Sprite.stroke(ctx, union, alpha(rim, 0.14), width: 3.2)
+            Sprite.stroke(ctx, union, alpha(rim, 0.3), width: 1.2)
+        }
+    }
+
+    private static func alpha(_ c: CGColor, _ a: CGFloat) -> CGColor { c.copy(alpha: a) ?? c }
+
+    /// The head, facing right, its middle at the origin: a sloping forehead,
+    /// a rounded crown and the throat running into the neck.
+    private static func headShape(_ t: CGAffineTransform) -> CGPath {
+        let p = CGMutablePath()
+        p.move(to: CGPoint(x: 4.6, y: -0.5), transform: t)
+        p.addQuadCurve(to: CGPoint(x: 0.6, y: -4.3), control: CGPoint(x: 3.6, y: -3.9), transform: t)
+        p.addQuadCurve(to: CGPoint(x: -4.4, y: -2.1), control: CGPoint(x: -2.9, y: -4.7), transform: t)
+        p.addQuadCurve(to: CGPoint(x: -4.4, y: 2.8), control: CGPoint(x: -5.6, y: 0.4), transform: t)
+        p.addQuadCurve(to: CGPoint(x: 2.6, y: 3.9), control: CGPoint(x: -0.8, y: 4.6), transform: t)
+        p.addQuadCurve(to: CGPoint(x: 4.6, y: 1.4), control: CGPoint(x: 4.3, y: 3.2), transform: t)
+        p.closeSubpath()
+        return p
+    }
+
+    private static func headTransform(at c: CGPoint, angle: CGFloat, back: Bool, turn: CGFloat, size: CGFloat) -> CGAffineTransform {
+        var t = CGAffineTransform(translationX: c.x, y: c.y)
+        if back { t = t.scaledBy(x: -1, y: 1) }
+        return t.rotated(by: angle).scaledBy(x: size * (1 - 0.18 * turn), y: size)
+    }
+
+    /// The bill and the eye, over a head already drawn. `reach` shortens
+    /// the bill when the head is turned towards us.
+    private static func face(_ ctx: CGContext, _ t: CGAffineTransform, open: CGFloat, blink: Bool, reach: CGFloat = 1) {
+        ctx.saveGState()
+        ctx.concatenate(t)
+        let len = 8.2 * reach
+        // The lower mandible turns open about the gape.
+        ctx.saveGState()
+        ctx.translateBy(x: 4.2, y: 1.0)
+        ctx.rotate(by: open)
+        let lower = CGMutablePath()
+        lower.move(to: CGPoint(x: 0, y: -0.2))
+        lower.addLine(to: CGPoint(x: len - 1.0, y: -0.25))
+        lower.addQuadCurve(to: CGPoint(x: len * 0.68, y: 1.25), control: CGPoint(x: len - 1.4, y: 1.15))
+        lower.addQuadCurve(to: CGPoint(x: 0, y: 1.0), control: CGPoint(x: len * 0.3, y: 0.95))
+        lower.closeSubpath()
+        Sprite.clipped(ctx, lower) {
+            Sprite.linear(ctx, from: .zero, to: CGPoint(x: len, y: 0), [(0, billBase), (1, billTip)])
+            Sprite.fill(ctx, Sprite.ellipse(len * 0.7, 0.55, 1.0 * reach + 0.2, 0.75), gonys)
+            Sprite.linear(ctx, from: CGPoint(x: 0, y: -0.3), to: CGPoint(x: 0, y: 1.3),
+                          [(0, Sprite.rgba(255, 255, 255, 0)), (1, Sprite.rgba(150, 100, 20, 0.35))])
+        }
+        ctx.restoreGState()
+        let upper = CGMutablePath()
+        upper.move(to: CGPoint(x: 3.9, y: -0.9))
+        upper.addQuadCurve(to: CGPoint(x: 4.2 + len - 0.4, y: -0.35), control: CGPoint(x: 4.2 + len * 0.55, y: -1.5))
+        upper.addQuadCurve(to: CGPoint(x: 4.2 + len - 0.9, y: 1.35), control: CGPoint(x: 4.2 + len + 0.35, y: 0.6))
+        upper.addQuadCurve(to: CGPoint(x: 4.2 + len - 1.6, y: 0.8), control: CGPoint(x: 4.2 + len - 1.1, y: 0.8))
+        upper.addLine(to: CGPoint(x: 4.3, y: 1.05))
+        upper.closeSubpath()
+        Sprite.clipped(ctx, upper) {
+            Sprite.linear(ctx, from: CGPoint(x: 4, y: 0), to: CGPoint(x: 4.2 + len, y: 0),
+                          [(0, billBase), (0.8, billTip), (1, Sprite.rgba(244, 222, 140, 1))])
+            Sprite.linear(ctx, from: CGPoint(x: 0, y: -1.2), to: CGPoint(x: 0, y: 1.1),
+                          [(0, Sprite.rgba(255, 250, 220, 0.5)), (0.5, Sprite.rgba(255, 255, 255, 0)), (1, Sprite.rgba(150, 100, 20, 0.3))])
+        }
+        // The gape and the nostril.
+        let gape = CGMutablePath()
+        gape.move(to: CGPoint(x: 4.0, y: 0.95))
+        gape.addLine(to: CGPoint(x: 4.2 + len * 0.62, y: 0.82))
+        Sprite.stroke(ctx, gape, Sprite.rgba(120, 80, 20, 0.55), width: 0.3)
+        let nostril = CGMutablePath()
+        nostril.move(to: CGPoint(x: 4.2 + len * 0.3, y: -0.35))
+        nostril.addLine(to: CGPoint(x: 4.2 + len * 0.48, y: -0.3))
+        Sprite.stroke(ctx, nostril, Sprite.rgba(120, 80, 20, 0.45), width: 0.3)
+        // The eye: a pale iris, a small pupil, a thin orange ring.
+        let eye = CGPoint(x: 1.3, y: -1.2)
+        if blink {
+            let lid = CGMutablePath()
+            lid.move(to: CGPoint(x: eye.x - 1, y: eye.y))
+            lid.addQuadCurve(to: CGPoint(x: eye.x + 1, y: eye.y), control: CGPoint(x: eye.x, y: eye.y + 0.6))
+            Sprite.stroke(ctx, lid, Sprite.rgba(90, 96, 104, 0.85), width: 0.4)
+        } else {
+            Sprite.fill(ctx, Sprite.ellipse(eye.x, eye.y, 0.95, 0.9), Sprite.rgba(238, 224, 160, 1))
+            Sprite.stroke(ctx, Sprite.ellipse(eye.x, eye.y, 1.0, 0.95), Sprite.rgba(222, 112, 62, 0.9), width: 0.3)
+            Sprite.fill(ctx, Sprite.ellipse(eye.x + 0.08, eye.y, 0.42, 0.42), Sprite.rgba(18, 18, 20, 1))
+            Sprite.fill(ctx, Sprite.ellipse(eye.x + 0.25, eye.y - 0.25, 0.17, 0.17), Sprite.rgba(255, 255, 255, 0.95))
+        }
+        ctx.restoreGState()
+    }
+
+    // MARK: Standing
+
     struct Look {
-        var head = CGPoint(x: 10, y: -29)
+        var head = CGPoint(x: 9.8, y: -30.4)
         var angle: CGFloat = 0
         var open: CGFloat = 0
         /// Turned to face backwards.
@@ -107,6 +249,8 @@ final class GullPictures {
         var overWing = false
         var bob: CGFloat = 0
         var crouch: CGFloat = 0
+        /// Turned towards us: 0 in profile, 1 three-quarters.
+        var turn: CGFloat = 0
         /// Each foot: moved forward, lifted.
         var feet: (CGFloat, CGFloat, CGFloat, CGFloat) = (0, 0, 0, 0)
     }
@@ -116,142 +260,122 @@ final class GullPictures {
         switch pose {
         case .idle: break
         case .blink: l.blink = true
-        case .lookUp: l.head = CGPoint(x: 10.5, y: -29.8); l.angle = -0.38
-        case .lookDown: l.head = CGPoint(x: 11.5, y: -27.4); l.angle = 0.5
-        case .lookBack: l.back = true; l.head = CGPoint(x: 8.5, y: -29.2); l.angle = -0.1
-        case .squawk: l.head = CGPoint(x: 10.8, y: -30.2); l.angle = -0.75; l.open = 0.5
-        case .preenA: l.back = true; l.overWing = true; l.head = CGPoint(x: -1.5, y: -26.5); l.angle = 0.75
-        case .preenB: l.back = true; l.overWing = true; l.head = CGPoint(x: -3.5, y: -25.8); l.angle = 0.95; l.blink = true
-        case .crouch: l.crouch = 2.6; l.head = CGPoint(x: 11, y: -27.6); l.angle = 0.1
+        case .lookUp: l.head = CGPoint(x: 10.2, y: -31); l.angle = -0.35
+        case .lookDown: l.head = CGPoint(x: 11.2, y: -29); l.angle = 0.45
+        case .lookBack: l.back = true; l.head = CGPoint(x: 8.2, y: -30.6); l.angle = -0.08
+        case .squawk: l.head = CGPoint(x: 10.6, y: -31.4); l.angle = -0.8; l.open = 0.42
+        case .preenA: l.back = true; l.overWing = true; l.head = CGPoint(x: -1.8, y: -27.4); l.angle = 0.75
+        case .preenB: l.back = true; l.overWing = true; l.head = CGPoint(x: -3.6, y: -26.6); l.angle = 0.95; l.blink = true
+        case .crouch: l.crouch = 2.6; l.head = CGPoint(x: 11, y: -28.8); l.angle = 0.1
         }
         return l
     }
 
-    private static func headTransform(at c: CGPoint, angle: CGFloat, back: Bool, size r: CGFloat) -> CGAffineTransform {
-        var t = CGAffineTransform(translationX: c.x, y: c.y)
-        if back { t = t.scaledBy(x: -1, y: 1) }
-        return t.rotated(by: angle).scaledBy(x: r / 5.2, y: r / 5.2)
-    }
-
-    private static func skull(_ t: CGAffineTransform) -> CGPath {
-        var t = t
-        return CGPath(ellipseIn: CGRect(x: -5.4, y: -5.1, width: 10.8, height: 10.2), transform: &t)
-    }
-
-    /// The bill and the eye, over a head already filled white.
-    private static func face(_ ctx: CGContext, _ t: CGAffineTransform, open: CGFloat, blink: Bool) {
-        ctx.saveGState()
-        ctx.concatenate(t)
-        // The lower mandible turns open about the gape.
-        ctx.saveGState()
-        ctx.translateBy(x: 3.8, y: 0.8)
-        ctx.rotate(by: open)
-        let lower = CGMutablePath()
-        lower.move(to: CGPoint(x: -0.4, y: -0.2))
-        lower.addLine(to: CGPoint(x: 6.7, y: -0.3))
-        lower.addQuadCurve(to: CGPoint(x: 4.9, y: 1.4), control: CGPoint(x: 6.2, y: 1.3))
-        lower.addQuadCurve(to: CGPoint(x: -0.2, y: 1.2), control: CGPoint(x: 2.2, y: 1.1))
-        lower.closeSubpath()
-        Sprite.fill(ctx, lower, beak)
-        Sprite.stroke(ctx, lower, beakEdge, width: 0.35)
-        Sprite.fill(ctx, Sprite.ellipse(5.0, 0.55, 0.85, 0.65), gonys)
-        ctx.restoreGState()
-        let upper = CGMutablePath()
-        upper.move(to: CGPoint(x: 3.1, y: -1.6))
-        upper.addQuadCurve(to: CGPoint(x: 11.0, y: -0.3), control: CGPoint(x: 7.6, y: -2.0))
-        upper.addQuadCurve(to: CGPoint(x: 10.7, y: 1.2), control: CGPoint(x: 11.7, y: 0.5))
-        upper.addQuadCurve(to: CGPoint(x: 10.0, y: 0.7), control: CGPoint(x: 10.4, y: 0.7))
-        upper.addLine(to: CGPoint(x: 3.5, y: 0.9))
-        upper.closeSubpath()
-        Sprite.fill(ctx, upper, beak)
-        Sprite.stroke(ctx, upper, beakEdge, width: 0.35)
-        if blink {
-            let lid = CGMutablePath()
-            lid.move(to: CGPoint(x: 0.9, y: -1.3))
-            lid.addQuadCurve(to: CGPoint(x: 3.0, y: -1.3), control: CGPoint(x: 1.95, y: -0.6))
-            Sprite.stroke(ctx, lid, Sprite.rgba(60, 64, 70, 0.9), width: 0.55)
-        } else {
-            Sprite.fill(ctx, Sprite.ellipse(1.95, -1.45, 1.05, 1.05), Sprite.rgba(232, 214, 120, 1))
-            Sprite.fill(ctx, Sprite.ellipse(2.05, -1.45, 0.62, 0.62), eye)
-            Sprite.fill(ctx, Sprite.ellipse(2.25, -1.7, 0.22, 0.22), Sprite.rgba(255, 255, 255, 0.9))
-        }
-        ctx.restoreGState()
-    }
-
-    /// White parts drawn as one: every outline first, then every fill over
-    /// them, so only the outer edge of the whole silhouette shows.
-    private static func silhouette(_ ctx: CGContext, _ parts: [CGPath]) {
-        for p in parts { Sprite.stroke(ctx, p, edge, width: 1.3) }
-        for p in parts { Sprite.fill(ctx, p, white) }
-    }
-
-    // MARK: Standing
-
     /// A standing gull, feet at (0, 0).
     private static func standing(_ ctx: CGContext, _ l: Look) {
         let dy = l.bob + l.crouch
-        // Legs, behind the body, with a knee that bends when crouching.
-        for (hip, foot, lift) in [(CGPoint(x: -1.5, y: -10.5 + dy), -2.2 + l.feet.0, l.feet.1),
-                                  (CGPoint(x: 2.6, y: -11 + dy), 2.8 + l.feet.2, l.feet.3)] {
-            let end = CGPoint(x: foot, y: -lift)
-            let knee = CGPoint(x: (hip.x + end.x) / 2 + l.crouch * 0.9, y: (hip.y + end.y) / 2)
+        let turn = l.turn
+        // Legs: the far one a little darker; turned towards us they stand apart.
+        let legs: [(hip: CGPoint, foot: CGFloat, lift: CGFloat, far: Bool)] = [
+            (CGPoint(x: 2.4 - turn * 0.6, y: -10.6 + dy), 2.6 + l.feet.2 + turn * 1.2, l.feet.3, true),
+            (CGPoint(x: -1.6 - turn * 0.6, y: -10.2 + dy), -2.2 + l.feet.0 - turn * 1.6, l.feet.1, false),
+        ]
+        for limb in legs {
+            let end = CGPoint(x: limb.foot, y: -limb.lift)
+            let knee = CGPoint(x: (limb.hip.x + end.x) / 2 + l.crouch * 0.9, y: (limb.hip.y + end.y) / 2)
             let p = CGMutablePath()
-            p.move(to: hip)
+            p.move(to: limb.hip)
             p.addLine(to: knee)
             p.addLine(to: end)
-            Sprite.stroke(ctx, p, leg, width: 1.5)
-            let toes = CGMutablePath()
-            toes.move(to: CGPoint(x: end.x - 1.2, y: end.y))
-            toes.addLine(to: CGPoint(x: end.x + 3.2, y: end.y + 0.2))
-            Sprite.stroke(ctx, toes, leg, width: 1.3)
+            Sprite.stroke(ctx, p, limb.far ? legShade : leg, width: 1.45)
+            // A webbed foot, shorter when it points towards us.
+            let toe = 4.4 * (1 - turn * 0.45)
+            let web = CGMutablePath()
+            web.move(to: CGPoint(x: end.x - 1.4, y: end.y - 0.2))
+            web.addLine(to: CGPoint(x: end.x + toe, y: end.y - 0.3))
+            web.addLine(to: CGPoint(x: end.x + toe * 0.8, y: end.y + 0.7))
+            web.addLine(to: CGPoint(x: end.x - 0.6, y: end.y + 0.6))
+            web.closeSubpath()
+            Sprite.fill(ctx, web, limb.far ? legShade : leg)
         }
         ctx.saveGState()
         ctx.translateBy(x: 0, y: dy)
-        let body = Sprite.ellipse(-1, -17.5, 14, 8.2, rotation: -0.16)
-        let breast = Sprite.ellipse(6.5, -22, 5.6, 7, rotation: 0.4)
-        let tail = CGMutablePath()
-        tail.move(to: CGPoint(x: -11, y: -20))
-        tail.addLine(to: CGPoint(x: -22.5, y: -17))
-        tail.addLine(to: CGPoint(x: -22, y: -14))
-        tail.addLine(to: CGPoint(x: -11, y: -12.5))
-        tail.closeSubpath()
-        let t = headTransform(at: CGPoint(x: l.head.x, y: l.head.y - dy * 0.3), angle: l.angle, back: l.back, size: 5.2)
-        let head = skull(t)
-        silhouette(ctx, l.overWing ? [tail, body, breast] : [tail, body, breast, head])
-        // The belly a little in shade.
-        Sprite.clipped(ctx, body) {
-            Sprite.linear(ctx, from: CGPoint(x: 0, y: -18), to: CGPoint(x: 0, y: -9),
-                          [(0, Sprite.rgba(255, 255, 255, 0)), (1, underside)])
-        }
+        // Turned towards us the body is shorter and the breast fuller.
+        let squeeze = CGAffineTransform(scaleX: 1 - 0.26 * turn, y: 1)
+        let body = CGMutablePath()
+        body.move(to: CGPoint(x: 6, y: -31), transform: squeeze)
+        body.addQuadCurve(to: CGPoint(x: 2, y: -26), control: CGPoint(x: 3.2, y: -29.5), transform: squeeze)
+        body.addQuadCurve(to: CGPoint(x: -12, y: -22), control: CGPoint(x: -4, y: -23.8), transform: squeeze)
+        body.addQuadCurve(to: CGPoint(x: -24.5, y: -16.6), control: CGPoint(x: -19, y: -19.6), transform: squeeze)
+        body.addLine(to: CGPoint(x: -25, y: -14.6), transform: squeeze)
+        body.addQuadCurve(to: CGPoint(x: -11.5, y: -11), control: CGPoint(x: -18, y: -12.2), transform: squeeze)
+        body.addQuadCurve(to: CGPoint(x: 4.5, y: -10.2), control: CGPoint(x: -3, y: -8.6), transform: squeeze)
+        body.addQuadCurve(to: CGPoint(x: 12, y: -19.5), control: CGPoint(x: 12, y: -12.2), transform: squeeze)
+        body.addQuadCurve(to: CGPoint(x: 12.5, y: -28), control: CGPoint(x: 12.8, y: -24), transform: squeeze)
+        body.addQuadCurve(to: CGPoint(x: 6, y: -31), control: CGPoint(x: 10, y: -32.5), transform: squeeze)
+        body.closeSubpath()
+        var parts: [CGPath] = [body]
+        if turn > 0 { parts.append(Sprite.ellipse(5.5, -18.5, 6.4 * turn + 0.1, 8.4)) }
+        let headCenter = CGPoint(x: l.head.x - turn * 1.8, y: l.head.y - dy * 0.3)
+        let t = headTransform(at: headCenter, angle: l.angle, back: l.back, turn: turn, size: 1)
+        let head = headShape(t)
+        if !l.overWing { parts.append(head) }
+        plumage(ctx, parts, shadeFrom: -24, shadeTo: -9)
+
         // The folded wing over the back, its black tips past the tail.
-        let primaries = CGMutablePath()
-        primaries.move(to: CGPoint(x: -12, y: -21.5))
-        primaries.addQuadCurve(to: CGPoint(x: -28, y: -16.4), control: CGPoint(x: -21, y: -20))
-        primaries.addLine(to: CGPoint(x: -27.2, y: -14.8))
-        primaries.addQuadCurve(to: CGPoint(x: -12, y: -15.2), control: CGPoint(x: -20, y: -14.6))
-        primaries.closeSubpath()
-        Sprite.fill(ctx, primaries, tip)
-        Sprite.fill(ctx, Sprite.ellipse(-25.6, -15.9, 0.9, 0.7), Sprite.rgba(255, 255, 255, 0.95))
-        Sprite.fill(ctx, Sprite.ellipse(-22.2, -16.6, 0.7, 0.55), Sprite.rgba(255, 255, 255, 0.85))
+        ctx.saveGState()
+        ctx.concatenate(squeeze)
+        for (i, tip) in [CGPoint(x: -29.6, y: -16.8), CGPoint(x: -28.3, y: -16.0), CGPoint(x: -26.9, y: -15.4),
+                         CGPoint(x: -25.3, y: -15.0), CGPoint(x: -23.5, y: -14.7)].enumerated().reversed() {
+            let base = CGPoint(x: -12 + CGFloat(i) * 0.3, y: -19.6 + CGFloat(i) * 1.0)
+            let f = CGMutablePath()
+            f.move(to: CGPoint(x: base.x, y: base.y - 1.1))
+            f.addQuadCurve(to: tip, control: CGPoint(x: (base.x + tip.x) / 2, y: base.y - 1.3))
+            f.addQuadCurve(to: CGPoint(x: base.x, y: base.y + 1.0), control: CGPoint(x: (base.x + tip.x) / 2, y: base.y + 0.9))
+            f.closeSubpath()
+            Sprite.clipped(ctx, f) {
+                Sprite.linear(ctx, from: CGPoint(x: base.x, y: base.y - 1), to: CGPoint(x: base.x, y: base.y + 1),
+                              [(0, blackSheen), (0.45, black), (1, black)])
+            }
+            if i < 2 {
+                Sprite.fill(ctx, Sprite.ellipse(tip.x + 1.6, tip.y + 0.1, 1.0, 0.55), Sprite.rgba(250, 250, 248, 0.95))
+            }
+        }
         let wing = CGMutablePath()
-        wing.move(to: CGPoint(x: 6, y: -22.5))
-        wing.addQuadCurve(to: CGPoint(x: -8, y: -25.8), control: CGPoint(x: 0, y: -26.8))
-        wing.addQuadCurve(to: CGPoint(x: -17, y: -19.2), control: CGPoint(x: -14, y: -24.4))
-        wing.addLine(to: CGPoint(x: -12, y: -14.4))
-        wing.addQuadCurve(to: CGPoint(x: 5, y: -17.2), control: CGPoint(x: -3, y: -13.2))
+        wing.move(to: CGPoint(x: 8.5, y: -23.5))
+        wing.addQuadCurve(to: CGPoint(x: -6, y: -25.6), control: CGPoint(x: 1, y: -26.6))
+        wing.addQuadCurve(to: CGPoint(x: -17.5, y: -19.4), control: CGPoint(x: -13.5, y: -24.2))
+        wing.addLine(to: CGPoint(x: -13, y: -14.6))
+        wing.addQuadCurve(to: CGPoint(x: 6.5, y: -17.8), control: CGPoint(x: -3.5, y: -13.4))
+        wing.addQuadCurve(to: CGPoint(x: 8.5, y: -23.5), control: CGPoint(x: 8.8, y: -20.5))
         wing.closeSubpath()
-        Sprite.fill(ctx, wing, mantle)
-        Sprite.stroke(ctx, wing, Sprite.rgba(110, 122, 134, 0.5), width: 0.5)
+        // A soft shadow the wing casts on the flank.
+        Sprite.clipped(ctx, body) {
+            Sprite.fill(ctx, Sprite.ellipse(-3, -14.2, 13, 2.2), Sprite.rgba(120, 132, 150, 0.16))
+        }
+        Sprite.clipped(ctx, wing) {
+            Sprite.linear(ctx, from: CGPoint(x: 0, y: -26), to: CGPoint(x: 0, y: -14),
+                          [(0, mantleDark), (0.6, mantleLight), (1, Sprite.rgba(196, 205, 214, 1))])
+            // Rows of feathers, just hinted.
+            for (a, b, c, alpha) in [(CGPoint(x: 5, y: -21.5), CGPoint(x: -12, y: -21), CGPoint(x: -3, y: -24), 0.35),
+                                     (CGPoint(x: 4, y: -19.6), CGPoint(x: -13, y: -17.8), CGPoint(x: -4, y: -20.6), 0.3),
+                                     (CGPoint(x: -4, y: -23.6), CGPoint(x: -16, y: -19.6), CGPoint(x: -11, y: -23), 0.25)] {
+                let row = CGMutablePath()
+                row.move(to: a)
+                row.addQuadCurve(to: b, control: c)
+                Sprite.stroke(ctx, row, Sprite.rgba(214, 222, 230, CGFloat(alpha)), width: 0.6)
+            }
+            Sprite.stroke(ctx, wing, Sprite.rgba(110, 122, 138, 0.35), width: 1.0)
+        }
+        // The white edges of the tertials.
         let tertials = CGMutablePath()
-        tertials.move(to: CGPoint(x: -11.4, y: -14.9))
-        tertials.addQuadCurve(to: CGPoint(x: 3.5, y: -17.1), control: CGPoint(x: -3, y: -13.9))
-        Sprite.stroke(ctx, tertials, Sprite.rgba(255, 255, 255, 0.95), width: 1.1)
-        let scapulars = CGMutablePath()
-        scapulars.move(to: CGPoint(x: -15.6, y: -20))
-        scapulars.addQuadCurve(to: CGPoint(x: -4, y: -19.4), control: CGPoint(x: -9, y: -21.6))
-        Sprite.stroke(ctx, scapulars, Sprite.rgba(255, 255, 255, 0.7), width: 0.7)
-        if l.overWing { silhouette(ctx, [head]) }
-        face(ctx, t, open: l.open, blink: l.blink)
+        tertials.move(to: CGPoint(x: -12.6, y: -15.2))
+        tertials.addQuadCurve(to: CGPoint(x: 4.2, y: -17.6), control: CGPoint(x: -3.5, y: -14.2))
+        Sprite.stroke(ctx, tertials, Sprite.rgba(252, 252, 250, 0.95), width: 1.3)
+        ctx.restoreGState()
+
+        if l.overWing { plumage(ctx, [head], shadeFrom: headCenter.y - 3, shadeTo: headCenter.y + 5, depth: 0.4) }
+        face(ctx, t, open: l.open, blink: l.blink, reach: 1 - 0.38 * turn)
         ctx.restoreGState()
     }
 
@@ -259,7 +383,8 @@ final class GullPictures {
 
     /// A flying gull, the middle of its body at (0, 0). `phase` runs through
     /// one wingbeat from wings high; nil is a glide.
-    private static func flight(_ ctx: CGContext, phase: Double?, legs: Bool) {
+    private static func flight(_ ctx: CGContext, _ view: View, phase: Double?, legs: Bool) {
+        let cam = view.camera
         let arm: CGFloat, hand: CGFloat, fold: CGFloat
         if let phase {
             // A quicker downstroke and a slower upstroke with the hand folded.
@@ -270,48 +395,63 @@ final class GullPictures {
             fold = max(0, CGFloat(-sin(a)))
         } else {
             arm = 0.14
-            hand = -0.14
+            hand = -0.16
             fold = 0
         }
-        wing(ctx, near: false, arm: arm, hand: hand, fold: fold)
+        wing(ctx, cam, near: false, arm: arm, hand: hand, fold: fold)
         if legs {
-            for (hip, foot) in [(CGPoint(x: -3.5, y: 3), CGPoint(x: -9, y: 11)),
-                                (CGPoint(x: -1.5, y: 3.5), CGPoint(x: -6.4, y: 12))] {
+            for (hip, foot, far) in [(CGPoint(x: -3.5, y: 3.2), CGPoint(x: -9, y: 11.2), true),
+                                     (CGPoint(x: -1.5, y: 3.8), CGPoint(x: -6.4, y: 12.2), false)] {
                 let p = CGMutablePath()
                 p.move(to: hip)
                 p.addLine(to: foot)
-                p.addLine(to: CGPoint(x: foot.x + 2.2, y: foot.y + 1.4))
-                Sprite.stroke(ctx, p, leg, width: 1.4)
+                Sprite.stroke(ctx, p, far ? legShade : leg, width: 1.4)
+                let web = CGMutablePath()
+                web.move(to: foot)
+                web.addLine(to: CGPoint(x: foot.x + 3.2, y: foot.y + 1.6))
+                web.addLine(to: CGPoint(x: foot.x + 0.8, y: foot.y + 2.4))
+                web.closeSubpath()
+                Sprite.fill(ctx, web, far ? legShade : leg)
             }
         }
-        let body = Sprite.ellipse(0, 0, 13.6, 5.7, rotation: -0.04)
-        let neck = Sprite.ellipse(8.5, -1.6, 5.2, 4.5, rotation: -0.3)
-        let tail = CGMutablePath()
-        tail.move(to: CGPoint(x: -11, y: -2.8))
-        tail.addLine(to: CGPoint(x: -21, y: -1.9))
-        tail.addQuadCurve(to: CGPoint(x: -21, y: 1.9), control: CGPoint(x: -21.8, y: 0))
-        tail.addLine(to: CGPoint(x: -11, y: 3.8))
-        tail.closeSubpath()
-        let t = headTransform(at: CGPoint(x: 13.2, y: -3.2), angle: 0.1, back: false, size: 4.8)
-        silhouette(ctx, [tail, body, neck, skull(t)])
-        Sprite.clipped(ctx, body) {
-            Sprite.linear(ctx, from: CGPoint(x: 0, y: -1), to: CGPoint(x: 0, y: 6),
-                          [(0, Sprite.rgba(255, 255, 255, 0)), (1, underside)])
+        let body = CGMutablePath()
+        body.move(to: CGPoint(x: 14.5, y: -5.8))
+        body.addQuadCurve(to: CGPoint(x: 10.5, y: -7.6), control: CGPoint(x: 13, y: -7.6))
+        body.addQuadCurve(to: CGPoint(x: 6, y: -4.6), control: CGPoint(x: 8, y: -7.4))
+        body.addQuadCurve(to: CGPoint(x: -8, y: -3.6), control: CGPoint(x: 0, y: -4.6))
+        body.addQuadCurve(to: CGPoint(x: -17, y: -2.2), control: CGPoint(x: -12, y: -3.2))
+        body.addLine(to: CGPoint(x: -22.5, y: -1.5))
+        body.addQuadCurve(to: CGPoint(x: -22.5, y: 1.5), control: CGPoint(x: -23.3, y: 0))
+        body.addLine(to: CGPoint(x: -16, y: 2.5))
+        body.addQuadCurve(to: CGPoint(x: -4, y: 5.4), control: CGPoint(x: -10, y: 5.2))
+        body.addQuadCurve(to: CGPoint(x: 8, y: 1.8), control: CGPoint(x: 4, y: 5.2))
+        body.addQuadCurve(to: CGPoint(x: 13.8, y: -2.4), control: CGPoint(x: 12, y: 0.6))
+        body.addQuadCurve(to: CGPoint(x: 14.5, y: -5.8), control: CGPoint(x: 15.4, y: -4.2))
+        body.closeSubpath()
+        // Seen from below, more of it is the shaded underside.
+        let from: CGFloat = cam.rise < 0 ? -8 : -5, depth: CGFloat = cam.rise < 0 ? 0.75 : 0.6
+        plumage(ctx, [body], shadeFrom: from, shadeTo: 5.5, depth: depth)
+        // The gray back shows from above.
+        if cam.rise > 0.2 {
+            let back = CGMutablePath()
+            back.move(to: CGPoint(x: 5, y: -4.4))
+            back.addQuadCurve(to: CGPoint(x: -12, y: -3.0), control: CGPoint(x: -3, y: -5.2))
+            back.addQuadCurve(to: CGPoint(x: 4, y: -2.6), control: CGPoint(x: -4, y: -2.2))
+            back.closeSubpath()
+            Sprite.fill(ctx, back, alpha(mantleLight, 0.8))
         }
-        face(ctx, t, open: 0, blink: false)
-        wing(ctx, near: true, arm: arm, hand: hand, fold: fold)
+        face(ctx, CGAffineTransform(translationX: 10.6, y: -4.6).scaledBy(x: 0.95, y: 0.95), open: 0, blink: false)
+        wing(ctx, cam, near: true, arm: arm, hand: hand, fold: fold)
     }
 
-    /// One wing, worked out in 3D and seen from the side and a little above:
-    /// the near one hangs a little below the body when level, the far one
-    /// shows above it. Raised high, the near wing shows its white underside.
-    private static func wing(_ ctx: CGContext, near: Bool, arm: CGFloat, hand: CGFloat, fold: CGFloat) {
+    /// One wing, worked out in 3D and seen through `cam`: a broad inner
+    /// wing and a hand of six separate primaries, gray above with a white
+    /// trailing edge, white below, black at the tips with white spots.
+    private static func wing(_ ctx: CGContext, _ cam: Camera, near: Bool, arm: CGFloat, hand: CGFloat, fold: CGFloat) {
         let L: CGFloat = 36
-        // Seen a little from above and from in front.
-        let yaw: CGFloat = 0.5, rise: CGFloat = 0.42
         let side: CGFloat = near ? 1 : -1
         typealias V = (x: CGFloat, y: CGFloat, z: CGFloat)
-        func project(_ v: V) -> CGPoint { CGPoint(x: v.x + yaw * v.y, y: -(v.z - rise * v.y)) }
+        func project(_ v: V) -> CGPoint { CGPoint(x: v.x + cam.yaw * v.y, y: -(v.z - cam.rise * v.y)) }
         let shoulder: V = (2, 0, 2.2)
         let armDir: V = (-0.22, side * cos(arm), sin(arm))
         let handDir: V = (-0.62 - 0.3 * fold, side * cos(hand), sin(hand))
@@ -330,8 +470,6 @@ final class GullPictures {
             v.x -= c * L
             return project(v)
         }
-        let lead: [(CGFloat, CGFloat)] = [(0, 0), (0.2, -0.02), (0.45, -0.05), (0.7, 0.0), (0.88, 0.07), (1.0, 0.14)]
-        let trail: [(CGFloat, CGFloat)] = [(1.0, 0.2), (0.93, 0.27), (0.8, 0.31), (0.6, 0.34), (0.45, 0.37), (0.2, 0.36), (0, 0.33)]
         func smooth(_ pts: [CGPoint], closed: Bool) -> CGPath {
             let path = CGMutablePath()
             guard pts.count > 2 else { return path }
@@ -344,40 +482,58 @@ final class GullPictures {
             if closed { path.closeSubpath() }
             return path
         }
-        let outline = smooth((lead + trail).map { point($0.0, $0.1) }, closed: true)
-        // Which side faces us: the top of the wing, or the white underside.
-        let facing = near ? -sin(arm) + rise * cos(arm) : sin(arm) + rise * cos(arm)
+        // Which side faces us, and how the light from above falls on it.
+        let facing = near ? -sin(arm) + cam.rise * cos(arm) : sin(arm) + cam.rise * cos(arm)
         let under = min(1, max(0, 0.5 - facing * 4))
-        let top = near ? mantle : farMantle, below = near ? underwing : farUnderwing
-        Sprite.fill(ctx, outline, mix(top, below, under))
-        // The black tips, with a white spot.
-        func interp(_ edge: [(CGFloat, CGFloat)], _ s: CGFloat) -> CGFloat {
-            let e = edge.sorted { $0.0 < $1.0 }
-            for i in 1..<e.count where s <= e[i].0 {
-                let f = (s - e[i - 1].0) / (e[i].0 - e[i - 1].0)
-                return e[i - 1].1 + (e[i].1 - e[i - 1].1) * f
+        let lit = max(0, cos(arm)) * 0.8 + 0.2
+        let top = mix(mantleDark, mantleLight, lit * (near ? 1 : 0.6))
+        let below = mix(underwingShade, underwing, near ? 0.75 : 0.35)
+        let base = mix(top, below, under)
+
+        // The primaries, outermost last so it lies on top.
+        for i in (0..<6).reversed() {
+            let fi = CGFloat(i)
+            let b0 = (s: 0.66, c: 0.03 + fi * 0.042)
+            let tip = (s: 1.0 - fi * 0.045, c: 0.13 + fi * 0.045)
+            let w: CGFloat = 0.046
+            let mid = (s: b0.s + (tip.s - b0.s) * 0.62, c: b0.c + (tip.c - b0.c) * 0.62)
+            let pts = [point(b0.s, b0.c - w), point(mid.s, mid.c - w * 0.9), point(tip.s - 0.015, tip.c - w * 0.4),
+                       point(tip.s, tip.c), point(tip.s - 0.015, tip.c + w * 0.4), point(mid.s, mid.c + w * 0.9),
+                       point(b0.s, b0.c + w)]
+            let feather = smooth(pts, closed: true)
+            let dark = mix(black, blackSheen, under * 0.5)
+            Sprite.fill(ctx, feather, dark)
+            Sprite.stroke(ctx, feather, alpha(blackSheen, 0.7), width: 0.3)
+            if i < 2 {
+                let spot = point(tip.s - 0.04, tip.c)
+                Sprite.fill(ctx, Sprite.ellipse(spot.x, spot.y, 0.9, 0.75), Sprite.rgba(250, 250, 248, 0.9))
             }
-            return e.last!.1
         }
-        let from: CGFloat = 0.72
-        let tipLead = [(from, interp(lead, from))] + lead.filter { $0.0 > from }
-        let tipTrail = trail.filter { $0.0 > from } + [(from, interp(trail, from))]
-        let tipPath = smooth((tipLead + tipTrail).map { point($0.0, $0.1) }, closed: true)
-        Sprite.fill(ctx, tipPath, mix(tip, Sprite.rgba(70, 72, 78, 1), under * 0.4))
-        let spot = point(0.94, 0.12)
-        Sprite.fill(ctx, Sprite.ellipse(spot.x, spot.y, 1.1, 0.9), Sprite.rgba(255, 255, 255, 0.9))
-        // A white trailing edge on top.
-        if under < 0.5 {
-            let edgeLine = smooth(trail.filter { $0.0 <= from + 0.02 }.reversed().map { point($0.0, $0.1 - 0.02) }, closed: false)
-            Sprite.stroke(ctx, edgeLine, Sprite.rgba(255, 255, 255, 0.85 * (1 - under * 2)), width: 1.0)
+        // The inner wing and the base of the hand.
+        let lead: [(CGFloat, CGFloat)] = [(0, 0), (0.2, -0.02), (0.45, -0.05), (0.62, -0.02), (0.76, 0.04)]
+        let trail: [(CGFloat, CGFloat)] = [(0.76, 0.3), (0.6, 0.34), (0.45, 0.37), (0.2, 0.36), (0, 0.33)]
+        let plate = smooth((lead + trail).map { point($0.0, $0.1) }, closed: true)
+        Sprite.fill(ctx, plate, base)
+        Sprite.clipped(ctx, plate) {
+            // Lighter towards the leading edge from above; the underside a
+            // little brighter in its middle.
+            let a = point(0.35, 0), b = point(0.35, 0.36)
+            Sprite.linear(ctx, from: a, to: b, under < 0.5
+                          ? [(0, Sprite.rgba(255, 255, 255, 0.18)), (0.6, Sprite.rgba(255, 255, 255, 0)), (1, Sprite.rgba(0, 0, 0, 0.06))]
+                          : [(0, Sprite.rgba(255, 255, 255, 0.1)), (0.5, Sprite.rgba(255, 255, 255, 0.25)), (1, Sprite.rgba(120, 130, 145, 0.15))])
+            // The white trailing edge on top, soft gray below.
+            let edge = smooth(trail.map { point($0.0, $0.1 - 0.012) }, closed: false)
+            Sprite.stroke(ctx, edge, under < 0.5 ? Sprite.rgba(252, 252, 250, 0.95) : Sprite.rgba(170, 180, 192, 0.45),
+                          width: under < 0.5 ? 2.4 : 1.6)
+            Sprite.stroke(ctx, plate, alpha(rim, 0.22), width: 1.4)
         }
-        Sprite.stroke(ctx, outline, edge, width: 0.55)
     }
 
     private static func mix(_ a: CGColor, _ b: CGColor, _ t: CGFloat) -> CGColor {
         guard let ca = a.converted(to: CGColorSpace(name: CGColorSpace.sRGB)!, intent: .defaultIntent, options: nil)?.components,
               let cb = b.converted(to: CGColorSpace(name: CGColorSpace.sRGB)!, intent: .defaultIntent, options: nil)?.components,
               ca.count >= 4, cb.count >= 4 else { return a }
+        let t = min(max(t, 0), 1)
         return CGColor(srgbRed: ca[0] + (cb[0] - ca[0]) * t, green: ca[1] + (cb[1] - ca[1]) * t,
                        blue: ca[2] + (cb[2] - ca[2]) * t, alpha: ca[3] + (cb[3] - ca[3]) * t)
     }
@@ -389,11 +545,11 @@ private extension CGRect {
 
 // MARK: - Perches
 
-/// Something a gull can stand on: the line's rope, a garland's wire, or
-/// the bottom of the screen, as points along it in screen coordinates.
+/// Something a gull can stand on: the line's rope or a garland's wire, as
+/// points along it in screen coordinates.
 struct Perch {
     enum Kind: Equatable {
-        case rope, garland(UUID), ground
+        case rope, garland(UUID)
     }
 
     let kind: Kind
@@ -452,11 +608,12 @@ struct Perch {
 // MARK: - Visits
 
 /// Now and then a seagull flies over the desktop. Sometimes it only passes
-/// by, sometimes it lands on the line, on a garland or at the bottom of the
-/// screen, looks around, preens, walks a little, and flies off. The rope
-/// sags under it and swings when it lands or takes off; its wings stir the
-/// bulbs and the candle flames. Double-click it and it follows the pointer
-/// until double-clicked again.
+/// by, more often it lands on the line, now and then on a garland, looks
+/// around, preens, walks a little, and flies off. The rope sags under it
+/// and swings when it lands or takes off; its wings stir the bulbs and the
+/// candle flames. Double-click it and it follows the pointer until
+/// double-clicked again. ⌥⌘G calls one or sends it away; pressed twice
+/// quickly, the gull follows the pointer.
 @MainActor
 final class Seagulls {
     let line: Line
@@ -500,6 +657,7 @@ final class Seagulls {
 
     /// A gull comes now, unless one is here already.
     func arrive() {
+        if let visit, visit.isLeaving { visit.end() }
         guard visit == nil, let screen = GarlandController.lineScreen else { return }
         let v = GullVisit(screen: screen, world: self)
         visit = v
@@ -507,6 +665,29 @@ final class Seagulls {
             if self?.visit === v { self?.visit = nil }
         }
         v.start()
+    }
+
+    private var pressTimer: Timer?
+
+    /// ⌥⌘G: once calls a gull, or sends away the one that is here; twice
+    /// quickly, it follows the pointer, or stops following.
+    func shortcutPressed() {
+        if let t = pressTimer {
+            t.invalidate()
+            pressTimer = nil
+            if visit == nil { arrive() }
+            visit?.toggleFollowing()
+            return
+        }
+        let t = Timer(timeInterval: 0.3, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.pressTimer = nil
+                if let visit = self.visit, !visit.isLeaving { visit.leave() } else { self.arrive() }
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        pressTimer = t
     }
 
     func menu() -> NSMenu {
@@ -517,12 +698,17 @@ final class Seagulls {
         }
         on.state = isOn ? .on : .off
         menu.addItem(on)
-        menu.addItem(ClosureMenuItem(L("Call a seagull now", "Llamar a una gaviota")) { [weak self] in self?.arrive() })
+        let call = ClosureMenuItem(L("Call a seagull now", "Llamar a una gaviota")) { [weak self] in self?.arrive() }
+        call.keyEquivalent = "g"
+        call.keyEquivalentModifierMask = [.option, .command]
+        menu.addItem(call)
         menu.addItem(.separator())
-        let hint = NSMenuItem(title: L("Double-click a seagull to have it follow you",
-                                       "Doble clic en la gaviota para que te siga"), action: nil, keyEquivalent: "")
-        hint.isEnabled = false
-        menu.addItem(hint)
+        for text in [L("⌥⌘G calls a seagull or sends it away", "⌥⌘G llama a la gaviota o la espanta"),
+                     L("⌥⌘G twice, or a double-click on it: it follows you", "⌥⌘G dos veces o doble clic: te sigue")] {
+            let hint = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+            hint.isEnabled = false
+            menu.addItem(hint)
+        }
         return menu
     }
 
@@ -540,9 +726,6 @@ final class Seagulls {
             guard pts.count > 10 else { continue }
             result.append(Perch(kind: .garland(wire.id), points: pts, margin: 24))
         }
-        let v = screen.visibleFrame
-        result.append(Perch(kind: .ground, points: [CGPoint(x: v.minX, y: v.minY + 1), CGPoint(x: v.maxX, y: v.minY + 1)],
-                            margin: 60))
         return result
     }
 
@@ -568,8 +751,6 @@ final class Seagulls {
             line.bendRope(at: p.x - panel.frame.minX, depth: depth)
         case .garland(let id):
             decorations.bend(id, at: p, depth: depth)
-        case .ground:
-            break
         }
     }
 
@@ -634,6 +815,11 @@ final class GullVisit: NSObject {
     private static let levelPhase = 0.3
     private var flapUntil: CFTimeInterval = 0
     private var gone = false
+    /// How high it is seen from in flight, changed a step at a time.
+    private var view = GullPictures.View.above
+    private var viewChanged: CFTimeInterval = 0
+    /// Standing turned towards you, until then.
+    private var turnedUntil: CFTimeInterval = 0
     private var calmPace = false
 
     /// Following the pointer, after a double-click.
@@ -694,6 +880,9 @@ final class GullVisit: NSObject {
         self.link = link
     }
 
+    /// On its way off the screen, not coming back.
+    var isLeaving: Bool { !following && landing == nil && perch == nil && route.count == 1 && !screen.frame.contains(route[0]) }
+
     /// Flies off now.
     func leave() {
         following = false
@@ -702,13 +891,14 @@ final class GullVisit: NSObject {
         route = [exitPoint()]
     }
 
-    private func end() {
+    func end() {
         guard !gone else { return }
         gone = true
         link?.invalidate()
         link = nil
         if let bent { world.bend(bent.kind, at: bent.at, depth: 0) }
         window.orderOut(nil)
+        GullPictures.forget()
         onEnd?()
     }
 
@@ -749,12 +939,11 @@ final class GullVisit: NSObject {
     }
 
     private func choosePerch(_ perches: [Perch]) -> (perch: Perch, x: CGFloat)? {
-        // The line and the garlands more often than the ground.
+        // The line far more often than a garland.
         var weighted: [(Perch, Double)] = perches.map { p in
             switch p.kind {
-            case .rope: (p, 3)
-            case .garland: (p, 2.5)
-            case .ground: (p, 1)
+            case .rope: (p, 4)
+            case .garland: (p, 1)
             }
         }
         if let current = perch { weighted.removeAll { $0.0.kind == current.kind } }
@@ -918,11 +1107,9 @@ final class GullVisit: NSObject {
             depth = 0
             depthSpeed = 0
         }
-        if landing.perch.kind != .ground {
-            bent = (landing.perch.kind, p)
-            depthSpeed += 60 * impact
-        }
-        world.jolt(landing.perch.kind, at: p, strength: 2.6 * Double(impact))
+        bent = (landing.perch.kind, p)
+        depthSpeed += 32 * impact
+        world.jolt(landing.perch.kind, at: p, strength: 1.3 * Double(impact))
         // Settling the wings stirs the air once more.
         world.air(at: CGPoint(x: x, y: y + GullPictures.lift), velocity: CGVector(dx: facing * 520, dy: -300))
     }
@@ -932,8 +1119,8 @@ final class GullVisit: NSObject {
         if let from { facing = from.x > p.x ? -1 : 1 }
         mode = .rising(since: clock)
         pose = .crouch
-        depthSpeed += 90
-        world.jolt(perch.kind, at: p, strength: 3)
+        depthSpeed += 48
+        world.jolt(perch.kind, at: p, strength: 1.5)
         p.y += GullPictures.lift
         v = CGVector(dx: facing * 170, dy: 230)
         wingPhase = 0.1
@@ -1018,11 +1205,18 @@ final class GullVisit: NSObject {
         case ..<0.82:
             let dx = CGFloat.random(in: 20...90) * (Bool.random() ? 1 : -1)
             if let x = perch.spot(near: p.x + dx), abs(x - p.x) > 8 {
+                turnedUntil = 0
                 walkTo = x
                 walkSpeed = .random(in: 32...52)
             }
+        case ..<0.92:
+            // Turns towards you for a while.
+            turnedUntil = clock + .random(in: 3...8)
+            pose = .idle
+            nextIdea = clock + .random(in: 1...2)
         default:
             facing = -facing
+            turnedUntil = 0
         }
     }
 
@@ -1100,6 +1294,10 @@ final class GullVisit: NSObject {
             if case .standing = mode, count == 1 { squawks = 1; poseUntil = clock }
             return
         }
+        toggleFollowing()
+    }
+
+    func toggleFollowing() {
         following.toggle()
         if following {
             squawks = 2
@@ -1127,11 +1325,11 @@ final class GullVisit: NSObject {
             if case .standing = mode, let perch, perch.kind == b.kind { return true }
             return false
         }()
-        let weight: CGFloat = loaded ? 7 : 0
+        let weight: CGFloat = loaded ? 6 : 0
         let steps = 4
         let h = dt / CGFloat(steps)
         for _ in 0..<steps {
-            depthSpeed += (-90 * (depth - weight) - 5 * depthSpeed) * h
+            depthSpeed += (-90 * (depth - weight) - 8 * depthSpeed) * h
             depth += depthSpeed * h
         }
         depth = max(-12, min(20, depth))
@@ -1147,6 +1345,21 @@ final class GullVisit: NSObject {
 
     // MARK: Drawing
 
+    /// Gliding high up it is seen from below, white against the sky;
+    /// beating its wings lower down, from the side and a little above.
+    /// It changes a step at a time, as if it banked.
+    private func chooseView(legs: Bool) {
+        let f = screen.frame
+        let high = (p.y - f.minY) / f.height
+        let want: GullPictures.View
+        if legs { want = .above }
+        else if gliding { want = high > 0.55 ? .below : .level }
+        else { want = high > 0.75 ? .level : .above }
+        guard want != view, clock - viewChanged > 0.35 else { return }
+        viewChanged = clock
+        view = GullPictures.View(rawValue: view.rawValue + (want.rawValue > view.rawValue ? 1 : -1)) ?? want
+    }
+
     private func draw() {
         let picture: GullPictures.Picture
         var pitch: CGFloat = 0
@@ -1154,6 +1367,8 @@ final class GullVisit: NSObject {
         case .standing:
             if walkTo != nil {
                 picture = pictures.walk[Int(stride) % 4]
+            } else if clock < turnedUntil, let turned = pictures.turned[pose] {
+                picture = turned
             } else {
                 picture = pictures.stand[pose] ?? pictures.stand[.idle]!
             }
@@ -1161,11 +1376,12 @@ final class GullVisit: NSObject {
             picture = pictures.stand[.crouch]!
         case .flying:
             let legs = landing != nil && route.isEmpty && hypot(p.x - landing!.x, p.y - landing!.perch.y(at: landing!.x)) < 140
+            chooseView(legs: legs)
             if gliding {
-                picture = legs ? pictures.glideLegs : pictures.glide
+                picture = legs ? pictures.glideLegs : pictures.glide[view]!
             } else {
-                let i = Int(wingPhase * Double(pictures.flap.count)) % pictures.flap.count
-                picture = legs ? pictures.flapLegs[i] : pictures.flap[i]
+                let i = Int(wingPhase * Double(GullPictures.phases)) % GullPictures.phases
+                picture = legs ? pictures.flapLegs[i] : pictures.flap[view]![i]
             }
             pitch = max(-0.35, min(0.35, atan2(v.dy, max(abs(v.dx), 90)) * 0.6))
             if legs { pitch = 0.3 }

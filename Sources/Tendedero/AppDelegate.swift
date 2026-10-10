@@ -85,6 +85,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         seagulls = Seagulls(line: line, decorations: garlands,
                             linePanel: { [weak self] in self?.panel },
                             lineRevealed: { [weak self] in self?.isRevealed ?? false })
+        // ⌥⌘G calls a seagull or sends it away; twice quickly, it follows.
+        hotKeys.append(HotKey(keyCode: kVK_ANSI_G, modifiers: optionKey | cmdKey) { [weak self] in
+            self?.seagulls.shortcutPressed()
+        })
         lockScreen = LockScreen(line: line, panel: panel, decorations: garlands.store)
         watchMenuBarClicks()
 
