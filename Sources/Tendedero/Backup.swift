@@ -43,11 +43,23 @@ enum Backup {
         DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
     }
 
+    /// Copying the photos and writing the lists happen off the main
+    /// thread, one copy at a time, so the line never stops for a backup.
+    private static let queue = DispatchQueue(label: "app.tendedero.backup", qos: .utility)
+
     private static func write(_ line: Line) {
-        let live = line.items.filter { !$0.falling && !$0.flying }
+        let live = line.items.filter { !$0.falling && !$0.flying }.map { (url: $0.url, position: $0.position) }
         guard !live.isEmpty else { return }
-        let fm = FileManager.default
         let day = folder.appendingPathComponent(dayFormat.string(from: Date()), isDirectory: true)
+        let domain = UserDefaults.standard.persistentDomain(
+            forName: Bundle.main.bundleIdentifier ?? "app.tendedero.Tendedero") ?? [:]
+        let folder = folder, keep = keep
+        queue.async { writeFiles(live, to: day, settings: domain, in: folder, keep: keep) }
+    }
+
+    nonisolated private static func writeFiles(_ live: [(url: URL, position: Double)], to day: URL,
+                                               settings domain: [String: Any], in folder: URL, keep: Int) {
+        let fm = FileManager.default
         let temp = folder.appendingPathComponent(".writing-\(UUID().uuidString)", isDirectory: true)
         do {
             let photos = temp.appendingPathComponent("Photos", isDirectory: true)
@@ -60,8 +72,6 @@ enum Backup {
             }
             let lineData = try PropertyListSerialization.data(fromPropertyList: entries, format: .xml, options: 0)
             try lineData.write(to: temp.appendingPathComponent("line.plist"))
-            let domain = UserDefaults.standard.persistentDomain(
-                forName: Bundle.main.bundleIdentifier ?? "app.tendedero.Tendedero") ?? [:]
             let settings = try PropertyListSerialization.data(fromPropertyList: domain, format: .xml, options: 0)
             try settings.write(to: temp.appendingPathComponent("settings.plist"))
 
@@ -72,18 +82,20 @@ enum Backup {
             try? fm.removeItem(at: temp)
             return
         }
-        prune()
+        prune(folder, keep: keep)
     }
 
     /// Keeps the last `keep` days and clears what an interrupted write left.
-    private static func prune() {
+    /// The days are named yyyy-MM-dd, so their names sort by date.
+    nonisolated private static func prune(_ folder: URL, keep: Int) {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: folder.path) else { return }
         for name in names where name.hasPrefix(".writing-") {
             try? fm.removeItem(at: folder.appendingPathComponent(name))
         }
-        for old in days().dropFirst(keep) {
-            try? fm.removeItem(at: old.url)
+        let days = names.filter { $0.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil }
+        for name in days.sorted(by: >).dropFirst(keep) {
+            try? fm.removeItem(at: folder.appendingPathComponent(name))
         }
     }
 

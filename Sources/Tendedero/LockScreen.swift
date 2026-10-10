@@ -31,8 +31,13 @@ final class LockScreen {
     private var pendingExport: DispatchWorkItem?
     /// The desktop video the pictures were last drawn over.
     private var exportedVideo: URL?
-    /// A frame of the moving desktop picture, read once per video.
-    private var frameCache: (url: URL, image: CGImage)?
+    /// A frame of the moving desktop picture, read once per video. Used on
+    /// the export queue only.
+    nonisolated(unsafe) private static var frameCache: (url: URL, image: CGImage)?
+    /// Encoding and writing the pictures, two full screens of PNG, takes
+    /// a good part of a second: done here, the line and the photos never
+    /// stop for it. One at a time, so the newest pictures are written last.
+    private static let exportQueue = DispatchQueue(label: "app.tendedero.lockscreen.export", qos: .utility)
 
     /// Shared with the screen saver, which reads `line.png` and `state.json`.
     static var folder: URL {
@@ -119,23 +124,27 @@ final class LockScreen {
 
         let video = Self.aerialVideo()
         exportedVideo = video
+        // Only the drawing of the line itself needs the main thread.
         let overlay = drawLine(on: screen)
-        if let overlay { write(overlay, to: Self.overlayURL) } else { try? fm.removeItem(at: Self.overlayURL) }
-
+        let pixels = Self.pixels(of: screen)
+        let picture = NSWorkspace.shared.desktopImageURL(for: screen)
         let state: [String: Any] = [
             "video": video?.path ?? "",
             "overlay": overlay == nil ? "" : "line.png",
             "width": screen.frame.width,
             "height": screen.frame.height,
         ]
-        if let data = try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: Self.stateURL, options: .atomic)
-        }
-
-        if let overlay, let still = drawStill(on: screen, video: video, overlay: overlay) {
-            write(still, to: Self.stillURL)
-        } else {
-            try? fm.removeItem(at: Self.stillURL)
+        Self.exportQueue.async {
+            let fm = FileManager.default
+            if let overlay { Self.write(overlay, to: Self.overlayURL) } else { try? fm.removeItem(at: Self.overlayURL) }
+            if let data = try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys]) {
+                try? data.write(to: Self.stateURL, options: .atomic)
+            }
+            if let overlay, let still = Self.drawStill(pixels: pixels, video: video, picture: picture, overlay: overlay) {
+                Self.write(still, to: Self.stillURL)
+            } else {
+                try? fm.removeItem(at: Self.stillURL)
+            }
         }
     }
 
@@ -155,6 +164,8 @@ final class LockScreen {
             pendingExport?.cancel()
             export()
         }
+        // The pictures being written are needed now.
+        Self.exportQueue.sync {}
         let fm = FileManager.default
         guard fm.fileExists(atPath: Self.stillURL.path) else { return }
 
@@ -249,7 +260,7 @@ final class LockScreen {
     }
 
     /// A frame of the moving picture, or the still desktop picture.
-    private func background(for screen: NSScreen, video: URL?) -> CGImage? {
+    nonisolated private static func background(video: URL?, picture url: URL?) -> CGImage? {
         if let video {
             if let cached = frameCache, cached.url == video { return cached.image }
             let generator = AVAssetImageGenerator(asset: AVURLAsset(url: video))
@@ -261,14 +272,14 @@ final class LockScreen {
                 return frame
             }
         }
-        guard let url = NSWorkspace.shared.desktopImageURL(for: screen),
-              !url.lastPathComponent.hasPrefix("locked-") else { return nil }
-        return NSImage(contentsOf: url)?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        guard let url, !url.lastPathComponent.hasPrefix("locked-"),
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
     }
 
     // MARK: Drawing
 
-    private static func context(_ pixels: CGSize) -> CGContext? {
+    nonisolated private static func context(_ pixels: CGSize) -> CGContext? {
         CGContext(data: nil, width: Int(pixels.width), height: Int(pixels.height), bitsPerComponent: 8, bytesPerRow: 0,
                   space: CGColorSpace(name: CGColorSpace.sRGB)!,
                   bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
@@ -292,7 +303,9 @@ final class LockScreen {
         let showDecorations = decorations.visible && !decorations.isEmpty && Placement.allows(screen)
         guard !items.isEmpty || showDecorations, let ctx = Self.context(Self.pixels(of: screen)) else { return nil }
         let scale = screen.backingScaleFactor
-        if showDecorations { drawDecorations(on: screen, in: ctx) }
+        if showDecorations, let decor = decorationsImage(on: screen) {
+            ctx.draw(decor, in: CGRect(origin: .zero, size: Self.pixels(of: screen)))
+        }
         guard !items.isEmpty else { return ctx.makeImage() }
         let width = panel.frame.width
         let height = Layout.panelHeight
@@ -305,6 +318,28 @@ final class LockScreen {
                              y: (screen.frame.height - top - height) * scale)
         ctx.draw(still, in: CGRect(origin: origin, size: CGSize(width: width * scale, height: height * scale)))
         return ctx.makeImage()
+    }
+
+    /// What the decorations' picture is drawn from.
+    private struct DecorKey: Equatable {
+        let items: [Garland], style: GarlandStyle, candles: CandleSet?, candleStyle: CandleStyle
+        let frame: CGRect, scale: CGFloat
+    }
+    private var decorCache: (key: DecorKey, image: CGImage)?
+
+    /// The decorations over the whole screen. Drawing them, glow and shadows
+    /// included, takes over a second, and they rarely change while the line
+    /// changes all the time: the picture is kept and drawn again only when
+    /// the decorations themselves change.
+    private func decorationsImage(on screen: NSScreen) -> CGImage? {
+        let key = DecorKey(items: decorations.items, style: decorations.style, candles: decorations.candles,
+                           candleStyle: decorations.candleStyle, frame: screen.frame, scale: screen.backingScaleFactor)
+        if let cached = decorCache, cached.key == key { return cached.image }
+        guard let ctx = Self.context(Self.pixels(of: screen)) else { return nil }
+        drawDecorations(on: screen, in: ctx)
+        guard let image = ctx.makeImage() else { return nil }
+        decorCache = (key, image)
+        return image
     }
 
     /// The same layers the desktop shows, standing still: a blinking bulb or
@@ -325,13 +360,12 @@ final class LockScreen {
     }
 
     /// The desktop picture filling the screen, and the line over it.
-    private func drawStill(on screen: NSScreen, video: URL?, overlay: CGImage) -> CGImage? {
-        let pixels = Self.pixels(of: screen)
-        guard let ctx = Self.context(pixels) else { return nil }
+    nonisolated private static func drawStill(pixels: CGSize, video: URL?, picture url: URL?, overlay: CGImage) -> CGImage? {
+        guard let ctx = context(pixels) else { return nil }
         let canvas = CGRect(origin: .zero, size: pixels)
         ctx.setFillColor(NSColor.black.cgColor)
         ctx.fill(canvas)
-        if let picture = background(for: screen, video: video) {
+        if let picture = background(video: video, picture: url) {
             let w = CGFloat(picture.width), h = CGFloat(picture.height)
             let s = max(pixels.width / w, pixels.height / h)
             ctx.interpolationQuality = .high
@@ -344,7 +378,7 @@ final class LockScreen {
         return ctx.makeImage()
     }
 
-    private func write(_ image: CGImage, to url: URL) {
+    nonisolated private static func write(_ image: CGImage, to url: URL) {
         guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { return }
         do {
             try png.write(to: url, options: .atomic)
