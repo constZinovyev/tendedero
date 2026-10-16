@@ -28,16 +28,16 @@ final class NotesStore: ObservableObject {
     @Published private(set) var editorRevision = 0
     @Published var problem: String?
 
-    let notebook: Notebook
+    let notebook: NotebookStorage
     let sync: NotebookSync
     private var pending: (id: String, text: String)?
     private var saveTimer: Timer?
     private var pullTimer: Timer?
     private var observers: [NSObjectProtocol] = []
 
-    /// Opens the notebook at NOTES_ROOT (no remote unless NOTES_REMOTE), or
-    /// at the NotebookPath default, cloning it on the first run.
-    static func open() throws -> NotesStore {
+    /// The notebook's folder at NOTES_ROOT (no remote unless NOTES_REMOTE),
+    /// or at the NotebookPath default, cloned on the first run.
+    static func prepareFolder() throws -> URL {
         let environment = ProcessInfo.processInfo.environment
         let defaults = UserDefaults.standard
         let path: String
@@ -51,10 +51,10 @@ final class NotesStore: ObservableObject {
         }
         let root = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
         try NotebookSync.prepare(root: root, remote: remote)
-        return NotesStore(notebook: try Notebook(root: root), sync: NotebookSync(root: root))
+        return root
     }
 
-    init(notebook: Notebook, sync: NotebookSync) {
+    init(notebook: NotebookStorage, sync: NotebookSync) {
         self.notebook = notebook
         self.sync = sync
         sections = notebook.sections
@@ -176,10 +176,23 @@ final class NotesStore: ObservableObject {
     func history(of page: Page) -> [Revision] {
         saveNow()
         sync.commitNow()
-        return (try? sync.git.history(of: page.path)) ?? []
+        return (try? sync.git.history(of: notebook.storedPath(of: page))) ?? []
     }
 
-    func contents(of revision: Revision) -> String? { try? sync.git.contents(of: revision) }
+    func contents(of revision: Revision) -> String? {
+        (try? sync.git.data(of: revision)).flatMap { notebook.text(fromStored: $0, path: revision.path) }
+    }
+
+    /// Lets go of the notebook when it locks: timers stop, nothing points
+    /// back here, and the pages go with the store.
+    func close() {
+        saveNow()
+        pullTimer?.invalidate()
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
+        sync.onStateChange = nil
+        sync.onRemoteChanges = nil
+    }
 
     func restore(_ id: String, text: String) {
         pending = nil

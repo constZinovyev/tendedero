@@ -93,7 +93,7 @@ public final class Notebook {
         let folders = try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
             .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
             .map(\.lastPathComponent)
-            .filter { $0 != Self.attachmentsFolder }
+            .filter { ![Self.attachmentsFolder, SealedNotebook.pagesFolder, SealedNotebook.filesFolder].contains($0) }
             .sorted()
         for folder in folders where !manifest.sections.contains(where: { $0.folder == folder }) {
             manifest.sections.append(NotebookSection(folder: folder, title: folder, color: Self.palette[manifest.sections.count % Self.palette.count]))

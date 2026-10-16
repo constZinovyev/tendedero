@@ -16,7 +16,7 @@ extension NSAttributedString.Key {
 /// Only the lines an edit touches are restyled, and pictures are decoded at
 /// the size they are shown, so big screenshots cost little memory.
 final class MarkdownTextView: NSTextView, NSTextStorageDelegate {
-    var notebook: Notebook!
+    var notebook: NotebookStorage!
     var section = ""
     var onChange: ((String) -> Void)?
     private var loading = false
@@ -159,7 +159,7 @@ final class MarkdownTextView: NSTextView, NSTextStorageDelegate {
             linked.append(m.range)
             storage.addAttributes([.foregroundColor: dim, .font: bodyFont(bodySize - 3)], range: m.range)
             storage.addAttribute(.font, value: bodyFont(bodySize), range: m.range(at: 1))
-            if let url = notebook?.resolve(ns.substring(with: m.range(at: 2)), inSection: section) {
+            if let url = link(for: ns.substring(with: m.range(at: 2))) {
                 storage.addAttribute(.link, value: url, range: m.range(at: 1))
             }
         }
@@ -205,8 +205,8 @@ final class MarkdownTextView: NSTextView, NSTextStorageDelegate {
     /// The picture as one character, or the Markdown as text when the file
     /// is not in the notebook (a web picture, a missing file).
     private func picture(source: String, path: String) -> NSAttributedString {
-        guard let url = notebook?.resolve(path, inSection: section), url.isFileURL,
-              let image = Thumbnails.image(at: url, maxWidth: Self.pictureLimit) else {
+        guard let data = notebook?.attachment(path, inSection: section),
+              let image = Thumbnails.image(data: data, key: path, maxWidth: Self.pictureLimit) else {
             return NSAttributedString(string: source, attributes: baseAttributes)
         }
         let attachment = NSTextAttachment()
@@ -289,6 +289,33 @@ final class MarkdownTextView: NSTextView, NSTextStorageDelegate {
 
     // MARK: Clicks
 
+    /// Links to files in the notebook point here, so a click can open them.
+    static let attachmentScheme = "tendedero-file"
+
+    private func link(for target: String) -> URL? {
+        if let web = notebook?.webLink(target) { return web }
+        guard notebook?.attachment(target, inSection: section) != nil else { return nil }
+        var parts = URLComponents()
+        parts.scheme = Self.attachmentScheme
+        parts.path = target
+        return parts.url
+    }
+
+    override func clicked(onLink link: Any, at charIndex: Int) {
+        if let url = link as? URL, url.scheme == Self.attachmentScheme {
+            openAttachment(url.path)
+        } else {
+            super.clicked(onLink: link, at: charIndex)
+        }
+    }
+
+    /// A file from the notebook opens from a private copy that goes away
+    /// when the notebook locks.
+    private func openAttachment(_ path: String) {
+        guard let data = notebook?.attachment(path, inSection: section), let url = OpenedFiles.write(data, named: path) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     override func mouseDown(with event: NSEvent) {
         if let index = characterIndex(atViewPoint: convert(event.locationInWindow, from: nil)), let storage = textStorage {
             if let mark = Markdown.taskMark(in: storage.string as NSString, at: index) {
@@ -300,8 +327,8 @@ final class MarkdownTextView: NSTextView, NSTextStorageDelegate {
                 return
             }
             if event.clickCount == 2, let source = storage.attribute(.markdownSource, at: index, effectiveRange: nil) as? String,
-               let path = Markdown.images(in: source).first?.path, let url = notebook.resolve(path, inSection: section) {
-                NSWorkspace.shared.open(url)
+               let path = Markdown.images(in: source).first?.path {
+                openAttachment(path)
                 return
             }
         }
@@ -318,14 +345,17 @@ final class MarkdownTextView: NSTextView, NSTextStorageDelegate {
     }
 }
 
-/// Pictures decoded at the size they are shown, kept while memory allows.
+/// Pictures decoded at the size they are shown, kept while memory allows
+/// and forgotten when the notebook locks.
 enum Thumbnails {
     private static let cache = NSCache<NSString, NSImage>()
 
-    static func image(at url: URL, maxWidth: CGFloat, maxHeight: CGFloat = 420) -> NSImage? {
-        let key = "\(url.path)|\(Int(maxWidth))" as NSString
+    static func forget() { cache.removeAllObjects() }
+
+    static func image(data: Data, key name: String, maxWidth: CGFloat, maxHeight: CGFloat = 420) -> NSImage? {
+        let key = "\(name)|\(Int(maxWidth))" as NSString
         if let image = cache.object(forKey: key) { return image }
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let pixelWidth = properties[kCGImagePropertyPixelWidth] as? CGFloat,
               let pixelHeight = properties[kCGImagePropertyPixelHeight] as? CGFloat, pixelWidth > 0, pixelHeight > 0 else { return nil }
@@ -345,4 +375,21 @@ enum Thumbnails {
         cache.setObject(image, forKey: key)
         return image
     }
+}
+
+/// Files from the notebook opened in other apps: written to a folder only
+/// this user can read, and wiped when the notebook locks.
+enum OpenedFiles {
+    private static let folder = FileManager.default.temporaryDirectory.appendingPathComponent("TendederoNotes", isDirectory: true)
+
+    static func write(_ data: Data, named link: String) -> URL? {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let ext = (link as NSString).pathExtension
+        let url = folder.appendingPathComponent(UUID().uuidString).appendingPathExtension(ext)
+        guard fm.createFile(atPath: url.path, contents: data, attributes: [.posixPermissions: 0o600]) else { return nil }
+        return url
+    }
+
+    static func wipe() { try? FileManager.default.removeItem(at: folder) }
 }

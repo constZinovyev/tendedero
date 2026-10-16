@@ -18,6 +18,9 @@ public final class NotebookSync {
     /// Called on the main thread when a pull brought in changes.
     public var onRemoteChanges: (() -> Void)?
     public private(set) var lastSync: Date?
+    /// Commit messages that name nothing, for a sealed notebook: titles
+    /// in them would be readable by anyone with the repository.
+    public var privateMessages = false
 
     private let queue = DispatchQueue(label: "app.tendedero.notes.sync", qos: .utility)
     private var pendingCommit: DispatchWorkItem?
@@ -60,7 +63,7 @@ public final class NotebookSync {
     public func commitNow() {
         pendingCommit?.cancel()
         pendingCommit = nil
-        queue.sync { [git] in _ = try? git.commitAll(message: { Self.message(for: $0, git: git) }) }
+        queue.sync { [git] in _ = try? git.commitAll(message: { Self.message(for: $0, git: git, private: self.privateMessages) }) }
     }
 
     /// Commits and pushes before quitting, waiting at most `timeout` for the
@@ -70,7 +73,7 @@ public final class NotebookSync {
         pendingCommit = nil
         let done = DispatchSemaphore(value: 0)
         queue.async { [git] in
-            _ = try? git.commitAll(message: { Self.message(for: $0, git: git) })
+            _ = try? git.commitAll(message: { Self.message(for: $0, git: git, private: self.privateMessages) })
             done.signal()
             try? git.push()
         }
@@ -86,7 +89,7 @@ public final class NotebookSync {
             var state = State.idle
             var changed = false
             do {
-                try git.commitAll(message: { Self.message(for: $0, git: git) })
+                try git.commitAll(message: { Self.message(for: $0, git: git, private: self.privateMessages) })
                 if pull { changed = try git.pull() }
                 try git.push()
             } catch {
@@ -100,8 +103,9 @@ public final class NotebookSync {
         }
     }
 
-    static func message(for paths: [String], git: Git) -> String {
-        git.hasCommits ? describe(paths, root: git.root) : "Новая записная книжка"
+    static func message(for paths: [String], git: Git, private hidden: Bool = false) -> String {
+        guard git.hasCommits else { return "Новая записная книжка" }
+        return hidden ? "Заметки обновлены" : describe(paths, root: git.root)
     }
 
     /// A commit message naming the pages that changed, like

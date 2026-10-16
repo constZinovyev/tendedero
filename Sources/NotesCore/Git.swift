@@ -36,6 +36,10 @@ public final class Git {
 
     @discardableResult
     static func run(_ arguments: [String], in directory: URL) throws -> String {
+        String(decoding: try runData(arguments, in: directory), as: UTF8.self)
+    }
+
+    static func runData(_ arguments: [String], in directory: URL) throws -> Data {
         let process = Process()
         process.executableURL = executable
         process.arguments = ["-c", "core.quotepath=off"] + arguments
@@ -58,12 +62,11 @@ public final class Git {
         let output = out.fileHandleForReading.readDataToEndOfFile()
         group.wait()
         process.waitUntilExit()
-        let text = String(decoding: output, as: UTF8.self)
         guard process.terminationStatus == 0 else {
             throw GitError(arguments: arguments, status: process.terminationStatus,
-                           output: String(decoding: errors.data, as: UTF8.self) + text)
+                           output: String(decoding: errors.data, as: UTF8.self) + String(decoding: output, as: UTF8.self))
         }
-        return text
+        return output
     }
 
     private final class ErrorBuffer { var data = Data() }
@@ -151,6 +154,11 @@ public final class Git {
     /// The file as it was in that version; throws when it did not exist there.
     public func contents(of revision: Revision) throws -> String {
         try run(["show", "\(revision.hash):\(revision.path)"])
+    }
+
+    /// The same, as bytes, for sealed files.
+    public func data(of revision: Revision) throws -> Data {
+        try Self.runData(["show", "\(revision.hash):\(revision.path)"], in: root)
     }
 
     /// The user's own name and email when git has them, a stand-in otherwise.
