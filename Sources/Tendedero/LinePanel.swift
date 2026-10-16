@@ -22,6 +22,14 @@ enum Placement {
 
     static let maxTopOffset: CGFloat = 400
 
+    /// How big the photos hang, from 60% to their full size.
+    static var photoScale: Double {
+        get { let v = UserDefaults.standard.double(forKey: "photoScale"); return v == 0 ? 1 : min(max(v, minPhotoScale), 1) }
+        set { UserDefaults.standard.set(min(max(newValue, minPhotoScale), 1), forKey: "photoScale") }
+    }
+
+    static let minPhotoScale = 0.6
+
     static var mainScreen: NSScreen? { NSScreen.screens.first }
 
     /// Whether the line may come down on this screen.

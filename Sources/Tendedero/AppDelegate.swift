@@ -751,6 +751,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(offset)
 
+        let size = NSMenuItem()
+        size.view = SliderMenuView(
+            title: L("Photo size", "Tamaño de las fotos"),
+            value: Placement.photoScale * 100, range: Placement.minPhotoScale * 100...100, unit: "%"
+        ) { [weak self] value in
+            self?.setPhotoScale(value / 100)
+        }
+        menu.addItem(size)
+
         let garlandItem = NSMenuItem(title: L("Decorations", "Decoración"), action: nil, keyEquivalent: "")
         garlandItem.submenu = garlands.menu()
         menu.addItem(garlandItem)
@@ -811,6 +820,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Placement.topOffset = value.rounded()
         line.topOffset = Placement.topOffset
         panel.placeOnScreen(panel.screen)
+        wanted = true
+        refresh()
+        reveal(pinned: true)
+    }
+
+    private func setPhotoScale(_ value: Double) {
+        Placement.photoScale = (value * 20).rounded() / 20
+        line.photoScale = Placement.photoScale
         wanted = true
         refresh()
         reveal(pinned: true)

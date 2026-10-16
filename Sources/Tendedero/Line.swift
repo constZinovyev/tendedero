@@ -38,6 +38,8 @@ final class Line: ObservableObject {
     @Published var revealed = false
     /// How far below the menu bar the line hangs.
     @Published var topOffset = Placement.topOffset
+    /// How big the photos hang; the cards read it through PeggedView.
+    @Published var photoScale = Placement.photoScale
 
     /// Card frames in window coordinates, reported by the views. The panel
     /// uses them to only catch clicks over photos and let the rest through.
@@ -175,8 +177,10 @@ final class Line: ObservableObject {
 
     // MARK: Moving along the line
 
-    /// The edges a pin can reach, so the card never hangs off the screen.
-    private var margin: Double { min(0.45, Double((Layout.cardWidth / 2 + 12) / max(width, 1))) }
+    /// The edges a pin can reach: almost to the end of the line, so a card
+    /// can be tucked half off the screen, out of the way.
+    private var margin: Double { min(0.45, Double(Self.edgeGap / max(width, 1))) }
+    static let edgeGap: CGFloat = 14
 
     private func clamped(_ position: Double) -> Double {
         min(max(position, margin), 1 - margin)
@@ -187,9 +191,11 @@ final class Line: ObservableObject {
     private func freeSpot() -> Double {
         let taken = items.filter { !$0.falling }.map(\.position).sorted()
         guard let last = taken.last else { return 0.5 }
-        let step = Double(Layout.spacing / max(width, 1))
-        if last + step <= 1 - margin { return last + step }
-        let bounds = [margin] + taken + [1 - margin]
+        let step = Double(Layout.spacing * CGFloat(photoScale) / max(width, 1))
+        // New photos stay fully on screen; only a hand takes them past that.
+        let inside = min(0.45, Double((Layout.cardWidth * CGFloat(photoScale) / 2 + 12) / max(width, 1)))
+        if last + step <= 1 - inside { return last + step }
+        let bounds = [inside] + taken + [1 - inside]
         var best = (gap: -1.0, spot: 0.5)
         for (a, b) in zip(bounds, bounds.dropFirst()) where b - a > best.gap {
             best = (b - a, (a + b) / 2)
