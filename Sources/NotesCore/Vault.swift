@@ -24,8 +24,11 @@ public enum VaultError: LocalizedError, Equatable {
 public final class VaultKey {
     private let sealing: SymmetricKey
     private let naming: SymmetricKey
+    /// Kept only to be sealed again for Touch ID on this Mac.
+    let master: SymmetricKey
 
     init(master: SymmetricKey) {
+        self.master = master
         sealing = HKDF<SHA256>.deriveKey(inputKeyMaterial: master, info: Data("tendedero-notes-seal".utf8), outputByteCount: 32)
         naming = HKDF<SHA256>.deriveKey(inputKeyMaterial: master, info: Data("tendedero-notes-name".utf8), outputByteCount: 32)
     }

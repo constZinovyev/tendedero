@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import NotesCore
@@ -121,5 +122,23 @@ private let quick: UInt32 = 1_000
         #expect(history.map(\.message) == ["Заметки обновлены", "Новая записная книжка"])
         #expect(try history.map { notebook.text(fromStored: try git.data(of: $0), path: $0.path) } == ["вторая", "первая"])
         #expect(try String(contentsOf: root.appendingPathComponent(".gitattributes"), encoding: .utf8).contains("binary"))
+    }
+}
+
+@Suite struct FingerprintTests {
+    /// The enclave's part played by a software key: the same sealing.
+    @Test func theKeySealedForAFingerOpensTheSamePages() throws {
+        let root = temporaryFolder()
+        let key = try Vault.create(at: root, password: "пароль-пароль", rounds: 1_000)
+        let notebook = try SealedNotebook(root: root, key: key)
+        let page = try notebook.createPage(in: notebook.sections[0].folder, text: "тайна", date: Date())
+        let device = P256.KeyAgreement.PrivateKey()
+        let (ephemeral, sealed) = try Fingerprint.wrap(key.master, to: device.publicKey)
+        let shared = try device.sharedSecretFromKeyAgreement(with: P256.KeyAgreement.PublicKey(x963Representation: ephemeral))
+        let opened = VaultKey(master: try Fingerprint.unwrap(sealed, shared: shared, ephemeral: ephemeral))
+        #expect(try SealedNotebook(root: root, key: opened).page(page.id)?.text == "тайна")
+        let other = P256.KeyAgreement.PrivateKey()
+        let wrong = try other.sharedSecretFromKeyAgreement(with: P256.KeyAgreement.PublicKey(x963Representation: ephemeral))
+        #expect(throws: VaultError.self) { try Fingerprint.unwrap(sealed, shared: wrong, ephemeral: ephemeral) }
     }
 }

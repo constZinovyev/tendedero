@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import LocalAuthentication
 import NotesCore
 
 /// The notebook on the line: it keeps the notes repository in step, hangs
@@ -17,6 +18,8 @@ final class NotebookController {
     private var sync: NotebookSync?
     private var card: PasswordCard?
     private var lockTimer: Timer?
+    /// The open notebook's key, while it is open; forgotten on locking.
+    private var currentKey: VaultKey?
     private var storeObservers = Set<AnyCancellable>()
     private var systemObservers: [NSObjectProtocol] = []
     private var panel: BookPanel?
@@ -88,6 +91,22 @@ final class NotebookController {
     }
 
     var isLocked: Bool { store == nil }
+
+    /// The notebook's key sealed for Touch ID, on this Mac only.
+    private static var fingerprintFile: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Tendedero/Notebook/touchid.json")
+    }
+
+    /// Touch ID opens the notebook unless turned off in the menu.
+    static var fingerprintWanted: Bool {
+        get { !UserDefaults.standard.bool(forKey: "notebookTouchIDOff") }
+        set { UserDefaults.standard.set(!newValue, forKey: "notebookTouchIDOff") }
+    }
+
+    private var fingerprintReady: Bool {
+        Self.fingerprintWanted && Fingerprint.isAvailable && Fingerprint.isEnabled(Self.fingerprintFile)
+    }
 
     private func start() {
         if root == nil {
@@ -280,6 +299,50 @@ final class NotebookController {
         self.card = card
         card.place(under: near)
         card.makeKeyAndOrderFront(nil)
+        if mode == .unlock, fingerprintReady { askForFinger(card.model, root: root) }
+    }
+
+    /// The system's Touch ID sheet comes up; a cancel leaves the password.
+    private func askForFinger(_ model: PasswordModel, root: URL) {
+        model.fingerprint = true
+        let file = Self.fingerprintFile
+        Task.detached(priority: .userInitiated) {
+            let result = Result { try Fingerprint.unlock(file: file, reason: "открыть записную книжку") }
+            await MainActor.run { [weak self] in
+                guard let self, self.card?.model === model, self.store == nil else { return }
+                model.fingerprint = false
+                switch result {
+                case .success(let key):
+                    do {
+                        try self.unlock(with: key, root: root)
+                        self.card?.orderOut(nil)
+                        self.card = nil
+                        self.open()
+                    } catch {
+                        // Sealed for a notebook that is no more: forget it.
+                        Fingerprint.disable(file: file)
+                        model.error = "Touch ID больше не подходит. Введите пароль."
+                    }
+                case .failure(let error as NSError):
+                    // New fingerprints void the enclave key: it cannot come back.
+                    if error.domain == LAErrorDomain, error.code == LAError.biometryNotEnrolled.rawValue
+                        || error.code == LAError.invalidContext.rawValue {
+                        Fingerprint.disable(file: file)
+                    }
+                }
+            }
+        }
+    }
+
+    /// After a password: seal the key for Touch ID, so next time a finger does.
+    private func offerFingerprint(_ key: VaultKey) {
+        guard Self.fingerprintWanted, Fingerprint.isAvailable, !Fingerprint.isEnabled(Self.fingerprintFile) else { return }
+        do {
+            try Fingerprint.enable(for: key, file: Self.fingerprintFile)
+            log.notice("Notebook: Touch ID can open it now")
+        } catch {
+            log.error("Notebook: Touch ID: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private func submit(_ model: PasswordModel, root: URL) {
@@ -316,6 +379,7 @@ final class NotebookController {
         case .success(let key?):
             do {
                 try unlock(with: key, root: root)
+                offerFingerprint(key)
                 card?.orderOut(nil)
                 card = nil
                 open()
@@ -344,6 +408,7 @@ final class NotebookController {
         store.$problem.compactMap { $0 }.sink { log.error("Notebook: \($0, privacy: .public)") }
             .store(in: &storeObservers)
         self.store = store
+        currentKey = key
     }
 
     private func scheduleLock() {
@@ -372,6 +437,7 @@ final class NotebookController {
         sync?.syncNow()
         storeObservers.removeAll()
         self.store = nil
+        currentKey = nil
         book = nil
         panel = nil
         Thumbnails.forget()
@@ -419,6 +485,21 @@ final class NotebookController {
         }
         after.submenu = choices
         menu.addItem(after)
+        if Fingerprint.isAvailable {
+            let finger = ClosureMenuItem(L("Open with Touch ID", "Abrir con Touch ID")) { [weak self] in
+                Self.fingerprintWanted.toggle()
+                if !Self.fingerprintWanted {
+                    Fingerprint.disable(file: Self.fingerprintFile)
+                } else if let key = self?.currentKey {
+                    self?.offerFingerprint(key)
+                }
+                // Locked, it is sealed at the next password.
+            }
+            finger.state = Self.fingerprintWanted ? .on : .off
+            finger.toolTip = L("A finger opens the notebook on this Mac. The password always works too.",
+                               "Un dedo abre el cuaderno en este Mac. La contraseña sirve siempre.")
+            menu.addItem(finger)
+        }
         let change = ClosureMenuItem(L("Change password…", "Cambiar contraseña…")) { [weak self] in self?.askForPassword(.change) }
         change.isEnabled = root.map(Vault.exists(at:)) ?? false
         menu.addItem(change)

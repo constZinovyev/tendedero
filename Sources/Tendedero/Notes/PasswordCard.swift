@@ -59,6 +59,8 @@ final class PasswordModel: ObservableObject {
     @Published var error: String?
     @Published var working = false
     @Published var shakes = 0
+    /// Waiting for a finger on Touch ID; the password still works meanwhile.
+    @Published var fingerprint = false
 
     init(mode: PasswordCard.Mode) { self.mode = mode }
 
@@ -80,7 +82,7 @@ struct PasswordCardView: View {
 
     static func size(for mode: PasswordCard.Mode) -> CGSize {
         switch mode {
-        case .unlock: return CGSize(width: 350, height: 190)
+        case .unlock: return CGSize(width: 350, height: 230)
         case .create: return CGSize(width: 320, height: 300)
         case .change: return CGSize(width: 320, height: 290)
         }
@@ -116,6 +118,20 @@ struct PasswordCardView: View {
                     .font(.custom(NotebookLook.body, size: 11))
                     .foregroundStyle(Color(nsColor: NotebookLook.pencil))
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if model.fingerprint {
+                HStack(spacing: 10) {
+                    Image(systemName: "touchid")
+                        .font(.system(size: 26, weight: .light))
+                        .foregroundStyle(Color(red: 0.78, green: 0.30, blue: 0.32))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Приложите палец").font(.custom(NotebookLook.hand, size: 17))
+                        Text("или введите пароль").font(.custom(NotebookLook.body, size: 11))
+                            .foregroundStyle(Color(nsColor: NotebookLook.pencil))
+                    }
+                    .foregroundStyle(Color(nsColor: NotebookLook.ink))
+                }
+                .transition(.opacity)
             }
             if model.mode == .change {
                 field("Старый пароль", text: $model.old, as: .old)
@@ -155,6 +171,7 @@ struct PasswordCardView: View {
         .padding(12)
         .modifier(Shake(amount: CGFloat(model.shakes)))
         .animation(.linear(duration: 0.35), value: model.shakes)
+        .animation(.easeOut(duration: 0.2), value: model.fingerprint)
         .disabled(model.working)
         .onAppear { focus = model.mode == .change ? .old : .first }
         .onChange(of: model.working) { _, working in if !working { focus = model.mode == .change ? .old : .first } }
