@@ -11,6 +11,7 @@ final class NotebookController {
     private(set) var store: NotesStore?
     private var panel: BookPanel?
     private var book: BookView?
+    private var freePanel: FreeNotebookPanel?
     private var outsideClicks: Any?
     private var observers = Set<AnyCancellable>()
     private(set) var isOpen = false
@@ -21,10 +22,32 @@ final class NotebookController {
         set { UserDefaults.standard.set(!newValue, forKey: "notebookOff") }
     }
 
+    /// Off the rope, lying on the desktop where it was put down.
+    static var isFree: Bool {
+        get { UserDefaults.standard.bool(forKey: "notebookFree") }
+        set { UserDefaults.standard.set(newValue, forKey: "notebookFree") }
+    }
+
+    /// The top centre of the free notebook's cover, on screen.
+    private static var freeSpot: NSPoint? {
+        get {
+            let d = UserDefaults.standard
+            guard d.object(forKey: "notebookFreeX") != nil else { return nil }
+            return NSPoint(x: d.double(forKey: "notebookFreeX"), y: d.double(forKey: "notebookFreeY"))
+        }
+        set {
+            UserDefaults.standard.set(newValue.map { Double($0.x) }, forKey: "notebookFreeX")
+            UserDefaults.standard.set(newValue.map { Double($0.y) }, forKey: "notebookFreeY")
+        }
+    }
+
     init(line: Line, linePanel: @escaping () -> LinePanel?) {
         self.line = line
         self.linePanel = linePanel
         line.onNotebookTap = { [weak self] in self?.toggle() }
+        line.onNotebookTearOff = { [weak self] in self?.tearOff() }
+        line.onNotebookFreeDrag = { [weak self] in self?.carry() }
+        line.onNotebookFreeDrop = { [weak self] in self?.putDown() }
         if Self.isEnabled { start() }
     }
 
@@ -36,12 +59,97 @@ final class NotebookController {
                 log.error("Notebook: \(error.localizedDescription, privacy: .public)")
                 return
             }
-            store?.$sections.sink { [weak self] sections in self?.line.notebookTabs = sections.map(\.color) }
-                .store(in: &observers)
+            store?.$sections.sink { [weak self] sections in
+                self?.line.notebookTabs = sections.map(\.color)
+                self?.freePanel?.model.tabs = sections.map(\.color)
+            }
+            .store(in: &observers)
             store?.$problem.compactMap { $0 }.sink { log.error("Notebook: \($0, privacy: .public)") }
                 .store(in: &observers)
         }
-        line.notebookShown = true
+        if Self.isFree, let spot = Self.freeSpot {
+            showFree(coverTop: spot)
+            line.notebookShown = false
+        } else {
+            Self.isFree = false
+            line.notebookShown = true
+        }
+    }
+
+    // MARK: Off the rope
+
+    private func makeFreePanel() -> FreeNotebookPanel {
+        if let freePanel { return freePanel }
+        let panel = FreeNotebookPanel()
+        panel.model.tabs = line.notebookTabs
+        panel.onTap = { [weak self] in self?.toggle() }
+        panel.onDrop = { [weak self] in self?.putDown() }
+        freePanel = panel
+        return panel
+    }
+
+    private func showFree(coverTop: NSPoint) {
+        let panel = makeFreePanel()
+        panel.applyLevel()
+        panel.place(coverTop: coverTop)
+        panel.model.hidden = false
+        panel.orderFrontRegardless()
+    }
+
+    /// The hand holds the cover a little below its top edge.
+    private var underHand: NSPoint {
+        let mouse = NSEvent.mouseLocation
+        return NSPoint(x: mouse.x, y: mouse.y + 26)
+    }
+
+    /// Pulled off the pin: from here the drag carries the free notebook.
+    private func tearOff() {
+        showFree(coverTop: underHand)
+        freePanel?.model.moving = true
+        if !UserDefaults.standard.bool(forKey: "soundOff"), let pop = NSSound(named: "Pop")?.copy() as? NSSound {
+            pop.volume = 0.2
+            pop.play()
+        }
+    }
+
+    private func carry() {
+        freePanel?.place(coverTop: underHand)
+    }
+
+    /// Let go: back on the rope if brought up to it, otherwise it stays
+    /// where it was put down.
+    private func putDown() {
+        guard let panel = freePanel else { return }
+        panel.model.moving = false
+        if let spot = ropeSpot(for: panel.coverFrame) {
+            panel.orderOut(nil)
+            Self.isFree = false
+            line.moveNotebook(to: spot)
+            line.saveNotebookPosition()
+            line.notebookShown = true
+        } else {
+            Self.isFree = true
+            Self.freeSpot = NSPoint(x: panel.coverFrame.midX, y: panel.coverFrame.maxY)
+            line.notebookShown = false
+        }
+    }
+
+    /// Where on the rope a notebook brought this close would hang, as a
+    /// fraction of the line, or nil when it is not near the rope.
+    private func ropeSpot(for cover: CGRect) -> Double? {
+        guard line.revealed, let lp = linePanel(), lp.frame.width > 0 else { return nil }
+        let x = cover.minX + (cover.width + NotebookLook.tabReach) / 2 - lp.frame.minX
+        guard x >= 0, x <= lp.frame.width else { return nil }
+        let rope = lp.frame.maxY - line.topOffset - Layout.ropeY(x: x, width: lp.frame.width)
+        guard abs(cover.maxY - rope) < 46 else { return nil }
+        return Double(x / lp.frame.width)
+    }
+
+    /// Back on the rope, where it hung last.
+    func hangBack() {
+        freePanel?.orderOut(nil)
+        Self.isFree = false
+        line.notebookShown = Self.isEnabled
     }
 
     func setEnabled(_ on: Bool) {
@@ -51,6 +159,7 @@ final class NotebookController {
         } else {
             if isOpen { close() }
             line.notebookShown = false
+            freePanel?.orderOut(nil)
         }
     }
 
@@ -61,6 +170,7 @@ final class NotebookController {
     /// Where the closed notebook hangs on screen, from the line's layout:
     /// the same spot whether the line is down or tucked away.
     private func hangingFrame() -> CGRect? {
+        if Self.isFree, let freePanel { return freePanel.coverFrame }
         guard let panel = linePanel() else { return nil }
         let width = panel.frame.width
         let x = CGFloat(line.notebookPosition) * width
@@ -71,8 +181,9 @@ final class NotebookController {
     }
 
     func open() {
+        let free = Self.isFree && freePanel != nil
         guard !isOpen, Self.isEnabled, let store, let from = hangingFrame(),
-              let screen = linePanel()?.screen ?? NSScreen.main else { return }
+              let screen = (free ? freePanel?.screen : linePanel()?.screen) ?? NSScreen.main else { return }
         if panel == nil {
             let book = BookView(store: store)
             book.onClose = { [weak self] in self?.close() }
@@ -84,7 +195,12 @@ final class NotebookController {
         guard let panel, let book, !book.animating else { return }
         isOpen = true
         panel.applyLevel()
-        panel.place(under: from, on: screen)
+        if free {
+            panel.place(around: from, on: screen)
+            freePanel?.model.hidden = true
+        } else {
+            panel.place(under: from, on: screen)
+        }
         panel.makeKeyAndOrderFront(nil)
         line.notebookOpen = true
         book.open(from: panel.convertFromScreen(from)) {}
@@ -105,6 +221,7 @@ final class NotebookController {
         let to = hangingFrame().map(panel.convertFromScreen) ?? BookGeometry.cover
         book.close(to: to) { [weak self] in
             panel.orderOut(nil)
+            self?.freePanel?.model.hidden = false
             self?.line.notebookOpen = false
             self?.store?.syncNow()
         }
@@ -128,6 +245,9 @@ final class NotebookController {
         open.keyEquivalentModifierMask = [.option, .command]
         open.isEnabled = Self.isEnabled && store != nil
         menu.addItem(open)
+        if Self.isFree {
+            menu.addItem(ClosureMenuItem(L("Hang it back on the line", "Volver a colgarlo")) { [weak self] in self?.hangBack() })
+        }
         let sync = ClosureMenuItem(L("Sync now", "Sincronizar ahora")) { [weak self] in self?.store?.syncNow() }
         sync.isEnabled = store != nil
         if let store, case .failed(let message) = store.syncState { sync.toolTip = message }
@@ -175,6 +295,17 @@ final class BookPanel: NSPanel {
         x = min(max(x, visible.minX), visible.maxX - size.width)
         var y = notebook.maxY + 6 - size.height
         y = max(y, visible.minY)
+        setFrame(CGRect(x: x, y: y, width: size.width, height: size.height), display: false)
+    }
+
+    /// Opens the book where the free notebook lies, its spine over it.
+    func place(around notebook: CGRect, on screen: NSScreen) {
+        let visible = screen.visibleFrame
+        let size = BookGeometry.size
+        var x = notebook.midX - BookGeometry.spineX
+        x = min(max(x, visible.minX), visible.maxX - size.width)
+        var y = notebook.midY - BookGeometry.base.midY
+        y = min(max(y, visible.minY), visible.maxY - size.height)
         setFrame(CGRect(x: x, y: y, width: size.width, height: size.height), display: false)
     }
 

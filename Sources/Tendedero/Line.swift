@@ -391,7 +391,13 @@ final class Line: ObservableObject {
     /// Where the closed notebook hangs, in the panel's coordinates with y down.
     var notebookRect: CGRect?
     var notebookDragging = false
+    /// Pulled off the rope and still in the hand: the drag goes on moving
+    /// the free notebook until the button comes up.
+    @Published var notebookTearing = false
     var onNotebookTap: (() -> Void)?
+    var onNotebookTearOff: (() -> Void)?
+    var onNotebookFreeDrag: (() -> Void)?
+    var onNotebookFreeDrop: (() -> Void)?
 
     func moveNotebook(to position: Double) {
         notebookPosition = clamped(position)

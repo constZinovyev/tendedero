@@ -107,7 +107,8 @@ private struct LinenWeave: View {
 }
 
 /// The closed notebook on its clothespin. A click opens it; dragging slides
-/// it along the rope like a photo; the breeze sways it.
+/// it along the rope like a photo; pulled down hard, it comes off the pin
+/// and can be put anywhere. The breeze sways it.
 struct NotebookOnLine: View {
     @ObservedObject var line: Line
     let width: CGFloat
@@ -115,6 +116,9 @@ struct NotebookOnLine: View {
     @State private var swing: Double = 0
     @State private var dragStart: Double?
     @State private var hovering = false
+    /// How far it is stretched down off the pin, before it comes away.
+    @State private var pull: CGFloat = 0
+    static let tearDistance: CGFloat = 70
 
     private var size: CGSize { NotebookLook.hangingSize }
 
@@ -139,7 +143,8 @@ struct NotebookOnLine: View {
             }
             .frame(width: size.width + NotebookLook.tabReach, height: size.height, alignment: .topLeading)
             .scaleEffect(hovering && !line.notebookOpen ? 1.03 : 1, anchor: .top)
-            .opacity(line.notebookOpen ? 0 : 1)
+            .offset(y: pull)
+            .opacity(line.notebookOpen || line.notebookTearing ? 0 : 1)
             .background(GeometryReader { g in
                 Color.clear.preference(key: NotebookRectKey.self, value: g.frame(in: .global))
             })
@@ -152,8 +157,23 @@ struct NotebookOnLine: View {
         .gesture(
             DragGesture(minimumDistance: 0, coordinateSpace: .global)
                 .onChanged { drag in
+                    if line.notebookTearing {
+                        line.onNotebookFreeDrag?()
+                        return
+                    }
                     if dragStart == nil { dragStart = line.notebookPosition }
-                    guard abs(drag.translation.width) > 3 || line.notebookDragging, let start = dragStart else { return }
+                    let down = max(0, drag.translation.height)
+                    // The pin holds on, then lets go.
+                    pull = down * 0.4
+                    if down > Self.tearDistance, let start = dragStart {
+                        pull = 0
+                        line.moveNotebook(to: start)
+                        line.notebookDragging = true
+                        line.notebookTearing = true
+                        line.onNotebookTearOff?()
+                        return
+                    }
+                    guard abs(drag.translation.width) > 3 || down > 3 || line.notebookDragging, let start = dragStart else { return }
                     line.notebookDragging = true
                     let before = line.notebookPosition
                     line.moveNotebook(to: start + Double(drag.translation.width / max(width, 1)))
@@ -162,6 +182,15 @@ struct NotebookOnLine: View {
                 }
                 .onEnded { _ in
                     dragStart = nil
+                    if line.notebookTearing {
+                        line.notebookTearing = false
+                        line.notebookDragging = false
+                        line.onNotebookFreeDrop?()
+                        return
+                    }
+                    if pull > 0 {
+                        withAnimation(.interpolatingSpring(stiffness: 120, damping: 9)) { pull = 0 }
+                    }
                     if line.notebookDragging {
                         line.notebookDragging = false
                         line.saveNotebookPosition()
