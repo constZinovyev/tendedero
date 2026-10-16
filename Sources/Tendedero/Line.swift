@@ -377,6 +377,36 @@ final class Line: ObservableObject {
         }
     }
 
+    // MARK: The notebook
+
+    /// Whether the notebook hangs on the line at all.
+    @Published var notebookShown = false
+    /// While it is open the book is drawn by its own panel, and the line
+    /// keeps only the clothespin.
+    @Published var notebookOpen = false
+    @Published private(set) var notebookPosition: Double =
+        UserDefaults.standard.object(forKey: "notebookPosition") as? Double ?? 0.86
+    /// The colours of the stickers peeking out of it, as #RRGGBB.
+    @Published var notebookTabs: [String] = []
+    /// Where the closed notebook hangs, in the panel's coordinates with y down.
+    var notebookRect: CGRect?
+    var notebookDragging = false
+    var onNotebookTap: (() -> Void)?
+
+    func moveNotebook(to position: Double) {
+        notebookPosition = clamped(position)
+    }
+
+    func saveNotebookPosition() {
+        UserDefaults.standard.set(notebookPosition, forKey: "notebookPosition")
+    }
+
+    /// Whether `p`, in the panel's coordinates with y down, is on the notebook.
+    func isOnNotebook(_ p: CGPoint) -> Bool {
+        guard notebookShown, revealed, !notebookOpen, let rect = notebookRect else { return false }
+        return rect.insetBy(dx: -4, dy: -4).contains(p)
+    }
+
     // MARK: A hand on the rope
 
     /// Whether the rope is in a hand right now.

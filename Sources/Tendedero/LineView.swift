@@ -55,6 +55,10 @@ struct LineView: View {
                         .position(x: x, y: ropeY - Layout.pinAbove + (Layout.panelHeight - ropeY) / 2)
                         .zIndex(line.slidingID == item.id ? Double(line.items.count) : stack[item.id] ?? 0)
                 }
+
+                if line.notebookShown {
+                    NotebookOnLine(line: line, width: width)
+                }
             }
             .animation(.spring(response: 0.55, dampingFraction: 0.78), value: line.items.map(\.id))
             .animation(.easeInOut(duration: 0.3), value: line.items.isEmpty)

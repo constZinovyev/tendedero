@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var noNap: NSObjectProtocol?
     private var seagulls: Seagulls!
     private var lockScreen: LockScreen!
+    private var notebook: NotebookController!
     private var cancellables = Set<AnyCancellable>()
     /// Watching the pointer: event monitors, so nothing runs while the
     /// mouse is still, and one timer for the next delayed decision.
@@ -114,6 +115,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.seagulls.fishPressed()
         })
         lockScreen = LockScreen(line: line, panel: panel, decorations: garlands.store)
+        notebook = NotebookController(line: line, linePanel: { [weak self] in self?.panel })
+        // ⌥⌘N opens the notebook or puts it back on the line.
+        hotKeys.append(HotKey(keyCode: kVK_ANSI_N, modifiers: optionKey | cmdKey) { [weak self] in
+            self?.notebook.toggle()
+        })
         watchMenuBarClicks()
 
         Markup.shared.onSaved = { [weak self] url in self?.line.reloadThumbnail(for: url) }
@@ -180,6 +186,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         if Inbox.isEnabled { Inbox.restore() }
         lockScreen.restore()
+        notebook.finish()
     }
 
     // MARK: Inbox mode
@@ -236,6 +243,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             source.setEventHandler { [weak self] in
                 if Inbox.isEnabled { Inbox.restore() }
                 self?.lockScreen.restore()
+                self?.notebook.finish()
                 exit(0)
             }
             source.resume()
@@ -615,13 +623,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// mouse while the cursor is over a photo. Everywhere else, clicks go to
     /// whatever is underneath.
     private func updateMousePassThrough(_ mouse: NSPoint) {
-        guard !GrabView.isDragging, line.slidingID == nil, !line.ropeHeld else { return }
+        guard !GrabView.isDragging, line.slidingID == nil, !line.ropeHeld, !line.notebookDragging else { return }
         let local = panel.convertPoint(fromScreen: mouse)
         let flipped = CGPoint(x: local.x, y: panel.frame.height - local.y)
         let hovered = line.photo(at: flipped, slack: 4)
         if line.hoveredID != hovered { line.hoveredID = hovered }
         // Right on the rope it catches the mouse too, so the rope can be pulled.
-        let catching = hovered != nil || line.isOnRope(flipped)
+        let catching = hovered != nil || line.isOnRope(flipped) || line.isOnNotebook(flipped)
         if panel.ignoresMouseEvents == catching {
             panel.ignoresMouseEvents = !catching
         }
@@ -763,6 +771,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let garlandItem = NSMenuItem(title: L("Decorations", "Decoración"), action: nil, keyEquivalent: "")
         garlandItem.submenu = garlands.menu()
         menu.addItem(garlandItem)
+
+        let notebookItem = NSMenuItem(title: L("Notebook", "Cuaderno"), action: nil, keyEquivalent: "")
+        notebookItem.submenu = notebook.menu()
+        menu.addItem(notebookItem)
 
         let gullItem = NSMenuItem(title: L("Seagulls", "Gaviotas"), action: nil, keyEquivalent: "")
         gullItem.submenu = seagulls.menu()
