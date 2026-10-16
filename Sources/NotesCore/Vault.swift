@@ -137,7 +137,7 @@ public enum Vault {
                                      s.bindMemory(to: UInt8.self).baseAddress, salt.count,
                                      CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256), rounds, &out, out.count)
         }
-        defer { out.withUnsafeMutableBytes { memset_s($0.baseAddress, 32, 0, 32) } }
+        defer { _ = out.withUnsafeMutableBytes { memset_s($0.baseAddress, 32, 0, 32) } }
         return SymmetricKey(data: out)
     }
 

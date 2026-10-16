@@ -62,7 +62,7 @@ final class NotebookController {
         line.onNotebookFreeDrag = { [weak self] in self?.carry() }
         line.onNotebookFreeDrop = { [weak self] in self?.putDown() }
         // Locking the screen or sleeping locks the notebook right away.
-        let lockNow: (Notification) -> Void = { [weak self] _ in MainActor.assumeIsolated { self?.lock() } }
+        let lockNow: @Sendable (Notification) -> Void = { [weak self] _ in MainActor.assumeIsolated { self?.lock() } }
         systemObservers.append(DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main, using: lockNow))
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
