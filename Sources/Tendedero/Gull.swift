@@ -1,5 +1,6 @@
 import AppKit
 import QuartzCore
+import Carbon
 
 // MARK: - Pictures
 
@@ -698,9 +699,10 @@ struct Perch {
 /// hops along, stretches its wings, pecks at the rope, sits down for a rest,
 /// calls, and flies off. The rope sags under it
 /// and swings when it lands or takes off; its wings stir the bulbs and the
-/// candle flames. Double-click it and it follows the pointer until
-/// double-clicked again. ⌥⌘G calls one or sends it away; pressed twice
-/// quickly, the gull follows the pointer.
+/// candle flames, and the photos it passes swing. Double-click it and it
+/// follows the pointer until double-clicked again. ⌥⌘G calls one or sends
+/// it away; pressed twice quickly, the gull is in your hands: the arrows
+/// walk it and fly it, space jumps, and it eats the fish it flies at.
 @MainActor
 final class Seagulls {
     let line: Line
@@ -710,6 +712,11 @@ final class Seagulls {
     private var visit: GullVisit?
     private var timer: Timer?
     let voice = GullVoice()
+    /// The keys caught while a gull is in your hands, and the arrows held.
+    private var keys: [HotKey] = []
+    private(set) var arrowsHeld = Set<Arrow>()
+    private var actsHeld = Set<GullVisit.Act>()
+    enum Arrow { case left, right, up, down }
 
     var isOn: Bool {
         get { !UserDefaults.standard.bool(forKey: "gullsOff") }
@@ -768,8 +775,8 @@ final class Seagulls {
     private var arriving = false
 
     /// A gull comes now, unless one is here already; `following`, it
-    /// follows the pointer from the start.
-    func arrive(following: Bool = false) {
+    /// follows the pointer from the start; `controlled`, it is in your hands.
+    func arrive(following: Bool = false, controlled: Bool = false) {
         if let visit, visit.isLeaving { visit.end() }
         guard visit == nil, !arriving, let screen = GarlandController.lineScreen else { return }
         arriving = true
@@ -784,18 +791,48 @@ final class Seagulls {
             }
             v.start()
             if following { v.toggleFollowing() }
+            if controlled { v.toggleControl() }
+        }
+    }
+
+    /// While a gull is in your hands, the arrows and a few letters are
+    /// caught from every app, and given back when it is let go. Through
+    /// hot keys, as ⌥⌘G is: no Accessibility permission needed.
+    func catchKeys(_ on: Bool) {
+        keys = []
+        arrowsHeld = []
+        actsHeld = []
+        guard on else { return }
+        let arrows: [(Int, Arrow)] = [(kVK_LeftArrow, .left), (kVK_RightArrow, .right), (kVK_UpArrow, .up), (kVK_DownArrow, .down)]
+        for (code, arrow) in arrows {
+            keys.append(HotKey(keyCode: code, modifiers: 0, action: { [weak self] in
+                self?.arrowsHeld.insert(arrow)
+            }, released: { [weak self] in
+                self?.arrowsHeld.remove(arrow)
+            }))
+        }
+        let acts: [(Int, GullVisit.Act)] = [(kVK_Space, .jump), (kVK_ANSI_S, .scratch), (kVK_ANSI_C, .call),
+                                            (kVK_ANSI_P, .preen), (kVK_ANSI_W, .stretch), (kVK_Escape, .release)]
+        for (code, act) in acts {
+            // Once per press: a key held down repeats.
+            keys.append(HotKey(keyCode: code, modifiers: 0, action: { [weak self] in
+                guard let self, self.actsHeld.insert(act).inserted else { return }
+                self.visit?.act(act)
+            }, released: { [weak self] in
+                self?.actsHeld.remove(act)
+            }))
         }
     }
 
     private var pressTimer: Timer?
 
     /// ⌥⌘G: once calls a gull, or sends away the one that is here; twice
-    /// quickly, it follows the pointer, or stops following.
+    /// quickly, the gull is in your hands, or let go again.
     func shortcutPressed() {
         if let t = pressTimer {
             t.invalidate()
             pressTimer = nil
-            if let visit { visit.toggleFollowing() } else { arrive(following: true) }
+            if let visit, !visit.isLeaving { visit.toggleControl() } else { arrive(controlled: true) }
             return
         }
         let t = Timer(timeInterval: 0.3, repeats: false) { [weak self] _ in
@@ -834,7 +871,10 @@ final class Seagulls {
         menu.addItem(sounds)
         menu.addItem(.separator())
         for text in [L("⌥⌘G calls a seagull or sends it away", "⌥⌘G llama a la gaviota o la espanta"),
-                     L("⌥⌘G twice, or a double-click on it: it follows you", "⌥⌘G dos veces o doble clic: te sigue")] {
+                     L("Double-click on it: it follows you", "Doble clic en ella: te sigue"),
+                     L("⌥⌘G twice: fly it yourself with the arrows", "⌥⌘G dos veces: vuélala tú con las flechas"),
+                     L("Space jumps or flaps, ↓ lands, S scratches, P preens, W stretches, C calls, esc lets go",
+                       "Espacio salta o aletea, ↓ aterriza, S se rasca, P se acicala, W estira, C grazna, esc la suelta")] {
             let hint = NSMenuItem(title: text, action: nil, keyEquivalent: "")
             hint.isEnabled = false
             menu.addItem(hint)
@@ -914,6 +954,26 @@ final class Seagulls {
 
     func air(at p: CGPoint, velocity: CGVector) {
         decorations.feelAir(at: p, velocity: velocity)
+        stirPhotos(at: p, velocity: velocity)
+    }
+
+    /// Air from the wings passing a photo on the line swings it, as a quick
+    /// hand does: the same push, weaker a little way off the card.
+    private func stirPhotos(at p: CGPoint, velocity: CGVector) {
+        guard lineIsDown, let panel = linePanel(), abs(velocity.dx) > 40,
+              !GrabView.isDragging, line.slidingID == nil, line.pressedID == nil else { return }
+        let reach: CGFloat = 46
+        guard panel.frame.insetBy(dx: -reach, dy: -reach).contains(p) else { return }
+        let local = panel.convertPoint(fromScreen: p)
+        let q = CGPoint(x: local.x, y: panel.frame.height - local.y)
+        for (id, rect) in line.hitRects {
+            let dx = max(rect.minX - q.x, 0, q.x - rect.maxX), dy = max(rect.minY - q.y, 0, q.y - rect.maxY)
+            let d = hypot(dx, dy)
+            guard d < reach else { continue }
+            let near = 1 - d / reach
+            let depth = min(1, max(0.3, (min(max(q.y, rect.minY), rect.maxY) - rect.minY + 14) / rect.height))
+            line.sway(id).push(byAirAt: Double(velocity.dx * near), depth: Double(depth))
+        }
     }
 }
 
@@ -1047,6 +1107,11 @@ final class GullVisit: NSObject {
 
     /// Following the pointer, after a double-click.
     private var following = false
+    /// In your hands, after ⌥⌘G twice: it goes where the arrows say.
+    private(set) var controlled = false
+    /// Where its feet were a frame ago, flying in your hands: crossing a
+    /// perch with ↓ held, it lands there.
+    private var lastFeet: CGFloat?
     private var pointerStillSince: CFTimeInterval = 0
     private var lastPointer: CGPoint?
     private var pointerSpeed: CGFloat = 0
@@ -1131,12 +1196,16 @@ final class GullVisit: NSObject {
 
     /// On its way off the screen, not coming back.
     var isLeaving: Bool {
-        !following && landing == nil && fishTarget == nil && perch == nil && route.count == 1 && !screen.frame.contains(route[0])
+        !following && !controlled && landing == nil && fishTarget == nil && perch == nil && route.count == 1 && !screen.frame.contains(route[0])
     }
 
     /// Flies off now.
     func leave() {
         following = false
+        if controlled {
+            controlled = false
+            world.catchKeys(false)
+        }
         if case .standing = mode { takeOff() }
         landing = nil
         fishTarget = nil
@@ -1146,6 +1215,7 @@ final class GullVisit: NSObject {
     func end() {
         guard !gone else { return }
         gone = true
+        if controlled { world.catchKeys(false) }
         link?.invalidate()
         link = nil
         if let bent { world.bend(bent.kind, at: bent.at, depth: 0) }
@@ -1229,7 +1299,7 @@ final class GullVisit: NSObject {
 
     /// A new fish while it is here: it goes for it if it is free.
     func noticeFish() {
-        guard !gone, !following, fishTarget == nil else { return }
+        guard !gone, !following, !controlled, fishTarget == nil else { return }
         switch mode {
         case .standing:
             guard !busy, squawks == 0 else { return }
@@ -1341,7 +1411,7 @@ final class GullVisit: NSObject {
         var pace = Pace.lively
         if case .flying = mode { pace = .flight }
         if case .standing = mode, walkTo == nil, hop == nil, clock >= stretchUntil, clock >= scratchUntil,
-           bent == nil || abs(depthSpeed) < 2, !following, !(perch.map { world.inHand($0.kind) } ?? false) {
+           bent == nil || abs(depthSpeed) < 2, !following, !controlled, !(perch.map { world.inHand($0.kind) } ?? false) {
             pace = .calm
         }
         if pace != currentPace {
@@ -1373,6 +1443,10 @@ final class GullVisit: NSObject {
     }
 
     private func fly(dt: CGFloat) {
+        if controlled {
+            steerFlying(dt: dt)
+            return
+        }
         if following {
             followFlying()
         } else {
@@ -1441,8 +1515,30 @@ final class GullVisit: NSObject {
         p.x += v.dx * dt
         p.y += v.dy * dt
         if abs(v.dx) > 35 { facing = v.dx > 0 ? 1 : -1 }
+        beatWings(dt: dt, approaching: approaching, hovering: hovering)
 
-        // Wings: beating while it climbs, slows down or has just set off;
+        // Nothing else until the fish is caught.
+        if tossing { return }
+
+        let speed = hypot(v.dx, v.dy)
+        if route.first != nil, dist < 36 {
+            route.removeFirst()
+            // Sometimes it stops for a moment, hanging in the wind.
+            if !following, !route.isEmpty || landing != nil, clock > nextHover,
+               screen.frame.insetBy(dx: 120, dy: 120).contains(p), Double.random(in: 0..<1) < 0.35 {
+                hoverUntil = clock + .random(in: 1.2...2.8)
+                nextHover = hoverUntil + .random(in: 6...14)
+            }
+        } else if forFish, dist < 5 || (dist < 12 && speed < 80) {
+            snatch()
+        } else if final, dist < 3 || (dist < 10 && speed < 70) {
+            touchDown()
+        }
+    }
+
+    /// Wings: beating or gliding, the air they stir, a call now and then.
+    private func beatWings(dt: CGFloat, approaching: Bool, hovering: Bool) {
+        // Beating while it climbs, slows down or has just set off;
         // otherwise a few beats and a glide, in turns.
         let speed = hypot(v.dx, v.dy)
         let mustBeat = !hovering && (v.dy > 60 || speed < 150 || approaching || clock < flapUntil)
@@ -1477,26 +1573,195 @@ final class GullVisit: NSObject {
             world.air(at: CGPoint(x: p.x, y: p.y - 24 * k), velocity: CGVector(dx: v.dx * 1.2, dy: -150 - beat * 600))
         }
         // Now and then a call in flight.
-        if !following, clock > nextFlightCall {
+        if !following, !controlled, clock > nextFlightCall {
             nextFlightCall = clock + .random(in: 5...14)
             if screen.frame.contains(p), Double.random(in: 0..<1) < 0.45 { world.voice.play(.flight, at: p) }
         }
+    }
 
-        // Nothing else until the fish is caught.
+    // MARK: In your hands
+
+    /// Flying where the arrows say: ← → along, ↑ up with the wings
+    /// beating, ↓ down; let go, it glides on, sinking a little. It keeps to
+    /// the screen, eats a fish its bill comes to, and with ↓ held it lands
+    /// on the rope or a garland its feet come down on.
+    private func steerFlying(dt: CGFloat) {
+        let keys = world.arrowsHeld
+        let x: CGFloat = (keys.contains(.right) ? 1 : 0) - (keys.contains(.left) ? 1 : 0)
+        let y: CGFloat = (keys.contains(.up) ? 1 : 0) - (keys.contains(.down) ? 1 : 0)
+        var want = CGVector(dx: x != 0 ? x * 330 : facing * 110, dy: y > 0 ? 230 : (y < 0 ? -260 : -35))
+        if y > 0 { flapUntil = max(flapUntil, clock + 0.25) }
+        if tossing { flapUntil = max(flapUntil, clock + 0.3) }
+        // The screen's edges push it back, as walls would.
+        let f = screen.frame.insetBy(dx: 30, dy: 24)
+        if p.x < f.minX { want.dx = max(want.dx, 280) }
+        if p.x > f.maxX { want.dx = min(want.dx, -280) }
+        if p.y < f.minY { want.dy = max(want.dy, 180) }
+        if p.y > f.maxY { want.dy = min(want.dy, -180) }
+        let turn: CGFloat = 3.2
+        v.dx += (want.dx - v.dx) * min(1, turn * dt)
+        v.dy += (want.dy - v.dy) * min(1, turn * dt)
+        p.x += v.dx * dt
+        p.y += v.dy * dt
+        if abs(v.dx) > 35 { facing = v.dx > 0 ? 1 : -1 }
+        beatWings(dt: dt, approaching: false, hovering: false)
+        let feet = p.y - GullPictures.lift
+        defer { lastFeet = feet }
         if tossing { return }
-
-        if route.first != nil, dist < 36 {
-            route.removeFirst()
-            // Sometimes it stops for a moment, hanging in the wind.
-            if !following, !route.isEmpty || landing != nil, clock > nextHover,
-               screen.frame.insetBy(dx: 120, dy: 120).contains(p), Double.random(in: 0..<1) < 0.35 {
-                hoverUntil = clock + .random(in: 1.2...2.8)
-                nextHover = hoverUntil + .random(in: 6...14)
-            }
-        } else if forFish, dist < 5 || (dist < 12 && speed < 80) {
+        // A fish at the bill: snatched, tossed and caught, as always.
+        if clock >= carryUntil,
+           let spot = fishSpots.first(where: { hypot($0.point.x - billTip.x, $0.point.y - billTip.y) < 16 * k }) {
+            fishTarget = (spot.id, spot.index)
             snatch()
-        } else if final, dist < 3 || (dist < 10 && speed < 70) {
-            touchDown()
+            return
+        }
+        // Down onto a perch: its feet crossing the rope or a wire.
+        guard keys.contains(.down), v.dy < 0, let before = lastFeet else { return }
+        for perch in perches where perch.canStand(at: p.x) {
+            let top = perch.y(at: p.x) - (bent?.kind == perch.kind ? depth : 0) - world.handDrop(perch, atX: p.x)
+            if before >= top - 2, feet <= top + 4 {
+                landing = (perch, p.x)
+                touchDown()
+                return
+            }
+        }
+    }
+
+    /// Standing in your hands: ← → walk along the perch, ↓ sits down, ↑
+    /// flies off. Returns whether it took off.
+    private func steerStanding(_ perch: Perch) -> Bool {
+        let keys = world.arrowsHeld
+        if keys.contains(.up) {
+            takeOff()
+            flapUntil = clock + 0.8
+            return true
+        }
+        let dir: CGFloat = (keys.contains(.right) ? 1 : 0) - (keys.contains(.left) ? 1 : 0)
+        if dir != 0, hop == nil {
+            stopFussing()
+            let ahead = p.x + dir * 24
+            if perch.canStand(at: ahead) {
+                walkTo = ahead
+                walkSpeed = 70
+            } else {
+                // The end of the perch, or a peg in the way: it only turns.
+                walkTo = nil
+                facing = dir
+            }
+        } else if dir == 0, walkTo != nil {
+            walkTo = nil
+        }
+        if keys.contains(.down), walkTo == nil, hop == nil {
+            if clock >= restUntil { oneLeg = false; headTarget = 0.1; headBack = false }
+            restUntil = max(restUntil, clock + 0.5)
+        }
+        return false
+    }
+
+    /// Whatever it was busy with standing, dropped.
+    private func stopFussing() {
+        preenUntil = 0
+        restUntil = 0
+        stretchUntil = 0
+        peckUntil = 0
+        scratchUntil = 0
+    }
+
+    enum Act { case jump, scratch, call, preen, stretch, release }
+
+    /// A key pressed while it is in your hands.
+    func act(_ act: Act) {
+        guard controlled, !gone else { return }
+        let standing: Bool = { if case .standing = mode { return true } else { return false } }()
+        switch act {
+        case .release:
+            toggleControl()
+        case .jump:
+            if standing {
+                guard hop == nil, let perch else { return }
+                // With ← or → held, a hop that way along the perch;
+                // otherwise up into the air.
+                let keys = world.arrowsHeld
+                let dir: CGFloat = (keys.contains(.right) ? 1 : 0) - (keys.contains(.left) ? 1 : 0)
+                if dir != 0, let x = perch.spot(near: p.x + dir * 60), (x - p.x) * dir > 16 {
+                    stopFussing()
+                    walkTo = nil
+                    facing = dir
+                    hop = (p.x, x, clock)
+                    headBack = false
+                    headTarget = 0
+                    turnedUntil = 0
+                    crouchUntil = clock + 0.1
+                    depthSpeed -= 12
+                    world.air(at: CGPoint(x: p.x, y: p.y + GullPictures.lift), velocity: CGVector(dx: facing * 260, dy: -200))
+                } else {
+                    takeOff()
+                    v.dy = 300
+                    flapUntil = clock + 0.8
+                }
+            } else {
+                // A strong beat up.
+                v.dy = max(v.dy, 0) + 240
+                flapUntil = clock + 0.5
+                gliding = false
+            }
+        case .scratch:
+            guard standing, hop == nil else { return }
+            stopFussing()
+            walkTo = nil
+            scratchUntil = clock + .random(in: 0.9...1.6)
+            headBack = false
+            headTarget = 0.45
+            turnedUntil = 0
+        case .preen:
+            guard standing, hop == nil else { return }
+            stopFussing()
+            walkTo = nil
+            preenUntil = clock + .random(in: 2...3.5)
+            nextNibble = clock + 0.2
+        case .stretch:
+            guard standing, hop == nil else { return }
+            stopFussing()
+            walkTo = nil
+            stretchUntil = clock + 1.1
+            headBack = false
+            turnedUntil = 0
+            world.air(at: CGPoint(x: p.x, y: p.y + GullPictures.lift), velocity: CGVector(dx: facing * 200, dy: -260))
+        case .call:
+            if standing {
+                guard squawks == 0 else { return }
+                stopFussing()
+                call(long: false)
+            } else {
+                world.voice.play(.flight, at: p)
+            }
+        }
+    }
+
+    /// ⌥⌘G twice: in your hands, or let go to go about its own business.
+    func toggleControl() {
+        controlled.toggle()
+        world.catchKeys(controlled)
+        following = false
+        lastFeet = nil
+        world.voice.play(.call, at: p)
+        if controlled {
+            landing = nil
+            route = []
+            fishTarget = nil
+            hoverUntil = 0
+            if case .standing = mode {
+                leaveAt = .greatestFiniteMagnitude
+                stopFussing()
+                squawks = 0
+            }
+        } else {
+            if case .standing = mode {
+                leaveAt = clock + .random(in: 20...50)
+                nextIdea = clock + 1.5
+            } else {
+                plan(arriving: false)
+            }
         }
     }
 
@@ -1515,7 +1780,7 @@ final class GullVisit: NSObject {
         }
         flapUntil = clock + 1.0
         v = CGVector(dx: facing * 40, dy: 60)
-        plan(arriving: false)
+        if !controlled { plan(arriving: false) }
     }
 
     private func touchDown() {
@@ -1603,13 +1868,15 @@ final class GullVisit: NSObject {
         // The line went up out of view: off it goes.
         if perch.kind == .rope, !world.lineIsDown {
             takeOff()
-            plan(arriving: false)
+            if !controlled { plan(arriving: false) }
             return
         }
         let m = NSEvent.mouseLocation
         let pointerNear = hypot(m.x - p.x, m.y - (p.y + 15 * k))
         if following {
             followStanding(perch)
+        } else if controlled {
+            if steerStanding(perch) { return }
         } else {
             // The pointer rushing at it frightens it off; only a slow,
             // careful hand gets close.
@@ -1726,7 +1993,7 @@ final class GullVisit: NSObject {
             headBack = Double.random(in: 0..<1) < (resting ? 0.25 : 0.12)
             headTarget = .random(in: -0.25...0.3)
             nextGlance = clock + (resting ? .random(in: 2...5) : .random(in: 0.4...2.4))
-            if !resting, Double.random(in: 0..<1) < 0.08 { facing = -facing }
+            if !resting, !controlled, Double.random(in: 0..<1) < 0.08 { facing = -facing }
         }
         if headBack && clock >= preenUntil && clock > holdUntil && clock > nextGlance - 0.2 { headBack = false }
         let ease = min(1, dt * (clock < nibbleUntil ? 30 : 16))
@@ -1902,7 +2169,8 @@ final class GullVisit: NSObject {
             if case .standing = mode, count == 1, squawks == 0 { squawks = 1; squawkAt = clock; longCalling = false }
             return
         }
-        toggleFollowing()
+        // In your hands it does not follow the pointer as well.
+        if !controlled { toggleFollowing() }
     }
 
     func toggleFollowing() {
@@ -2001,7 +2269,9 @@ final class GullVisit: NSObject {
         case .standing, .rising:
             break
         case .flying:
-            let legs = landing != nil && route.isEmpty && hypot(p.x - landing!.x, p.y - landing!.perch.y(at: landing!.x)) < 140
+            // Legs down coming in to land, or in your hands with ↓ held.
+            let legs = controlled ? world.arrowsHeld.contains(.down) && v.dy < 0
+                : landing != nil && route.isEmpty && hypot(p.x - landing!.x, p.y - landing!.perch.y(at: landing!.x)) < 140
             chooseView(legs: legs)
             if gliding {
                 flight = legs ? pictures.glideLegs : pictures.glide[view]!
