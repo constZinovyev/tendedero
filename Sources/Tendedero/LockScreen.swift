@@ -184,9 +184,12 @@ final class LockScreen {
         guard fm.fileExists(atPath: Self.stillURL.path) else { return }
 
         // Set the real settings aside once; a second lock keeps the first copy.
+        // A lock picture left over in them is mended first, so it is never
+        // what comes back.
         if original == nil {
             do {
-                try fm.copyItem(at: Self.wallpaperStore, to: Self.backupURL)
+                let data = try Data(contentsOf: Self.wallpaperStore)
+                try (Self.mended(data) ?? data).write(to: Self.backupURL, options: .atomic)
             } catch {
                 log.error("Lock screen: cannot copy the wallpaper settings, leaving them alone: \(error.localizedDescription, privacy: .public)")
                 return
@@ -216,8 +219,14 @@ final class LockScreen {
     /// Puts the real wallpaper settings back, moving pictures included, and
     /// has the wallpaper agent read them again.
     func restore() {
-        guard let backup = original else { return }
+        guard let backup = original else {
+            mendStore()
+            return
+        }
         let fm = FileManager.default
+        if let data = try? Data(contentsOf: backup), let mended = Self.mended(data) {
+            try? mended.write(to: backup, options: .atomic)
+        }
         do {
             _ = try fm.replaceItemAt(Self.wallpaperStore, withItemAt: backup)
         } catch {
@@ -234,6 +243,72 @@ final class LockScreen {
             try? fm.removeItem(at: old)
         }
         log.notice("Lock screen: desktop picture restored")
+    }
+
+    /// Mends the live settings when a lock picture was left in them, as
+    /// one was by a lock that ended badly: that Space showed the system's
+    /// fallback picture instead of the user's.
+    private func mendStore() {
+        guard !Self.screenIsLocked, let data = try? Data(contentsOf: Self.wallpaperStore),
+              let mended = Self.mended(data) else { return }
+        do {
+            try mended.write(to: Self.wallpaperStore, options: .atomic)
+        } catch {
+            log.error("Lock screen: could not mend the wallpaper settings: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        let agent = Process()
+        agent.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        agent.arguments = ["WallpaperAgent"]
+        try? agent.run()
+        agent.waitUntilExit()
+        log.notice("Lock screen: a leftover lock picture was replaced with the desktop picture")
+    }
+
+    /// The wallpaper settings with every choice of one of our lock pictures
+    /// replaced by the user's own moving picture, taken from another Space
+    /// or display. Nil when there is nothing to mend.
+    nonisolated static func mended(_ data: Data) -> Data? {
+        guard let store = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any]
+        else { return nil }
+        func isOurs(_ content: [String: Any]) -> Bool {
+            let choices = content["Choices"] as? [[String: Any]] ?? []
+            return choices.contains { choice in
+                (choice["Files"] as? [[String: Any]] ?? []).contains {
+                    ($0["relative"] as? String)?.contains("/Tendedero/LockScreen/locked-") == true
+                }
+            }
+        }
+        func isAerial(_ content: [String: Any]) -> Bool {
+            (content["Choices"] as? [[String: Any]] ?? []).contains { $0["Provider"] as? String == "com.apple.wallpaper.choice.aerials" }
+        }
+        var good: [String: Any]?
+        func find(_ value: Any) {
+            if let dict = value as? [String: Any] {
+                if good == nil, let content = dict["Content"] as? [String: Any], isAerial(content) { good = content }
+                for (key, child) in dict.sorted(by: { $0.key < $1.key }) where key != "Idle" { find(child) }
+            } else if let list = value as? [Any] {
+                list.forEach(find)
+            }
+        }
+        find(store)
+        guard let good else { return nil }
+        var changed = false
+        func mend(_ value: Any) -> Any {
+            if var dict = value as? [String: Any] {
+                if let content = dict["Content"] as? [String: Any], isOurs(content) {
+                    dict["Content"] = good
+                    changed = true
+                }
+                for (key, child) in dict where key != "Content" { dict[key] = mend(child) }
+                return dict
+            }
+            if let list = value as? [Any] { return list.map(mend) }
+            return value
+        }
+        let result = mend(store)
+        guard changed else { return nil }
+        return try? PropertyListSerialization.data(fromPropertyList: result, format: .binary, options: 0)
     }
 
     // MARK: The desktop picture
