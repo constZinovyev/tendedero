@@ -873,8 +873,8 @@ final class Seagulls {
         for text in [L("⌥⌘G calls a seagull or sends it away", "⌥⌘G llama a la gaviota o la espanta"),
                      L("Double-click on it: it follows you", "Doble clic en ella: te sigue"),
                      L("⌥⌘G twice: fly it yourself with the arrows", "⌥⌘G dos veces: vuélala tú con las flechas"),
-                     L("Space jumps or flaps, ↓ lands, S scratches, P preens, W stretches, C calls, esc lets go",
-                       "Espacio salta o aletea, ↓ aterriza, S se rasca, P se acicala, W estira, C grazna, esc la suelta")] {
+                     L("Space jumps or flaps, ↓ lands and again drops below, S scratches, P preens, W stretches, C calls, esc lets go",
+                       "Espacio salta o aletea, ↓ aterriza y otra vez baja por debajo, S se rasca, P se acicala, W estira, C grazna, esc la suelta")] {
             let hint = NSMenuItem(title: text, action: nil, keyEquivalent: "")
             hint.isEnabled = false
             menu.addItem(hint)
@@ -1112,6 +1112,9 @@ final class GullVisit: NSObject {
     /// Where its feet were a frame ago, flying in your hands: crossing a
     /// perch with ↓ held, it lands there.
     private var lastFeet: CGFloat?
+    /// ↓ still held from landing: it must be let go and pressed again
+    /// before the gull drops below the perch.
+    private var downStillHeld = false
     private var pointerStillSince: CFTimeInterval = 0
     private var lastPointer: CGPoint?
     private var pointerSpeed: CGFloat = 0
@@ -1627,10 +1630,15 @@ final class GullVisit: NSObject {
         }
     }
 
-    /// Standing in your hands: ← → walk along the perch, ↓ sits down, ↑
-    /// flies off. Returns whether it took off.
+    /// Standing in your hands: ← → walk along the perch, ↓ drops below
+    /// it, ↑ flies off. Returns whether it left the perch.
     private func steerStanding(_ perch: Perch) -> Bool {
         let keys = world.arrowsHeld
+        if !keys.contains(.down) { downStillHeld = false }
+        if keys.contains(.down), !downStillHeld, hop == nil {
+            dropBelow()
+            return true
+        }
         if keys.contains(.up) {
             takeOff()
             flapUntil = clock + 0.8
@@ -1651,11 +1659,28 @@ final class GullVisit: NSObject {
         } else if dir == 0, walkTo != nil {
             walkTo = nil
         }
-        if keys.contains(.down), walkTo == nil, hop == nil {
-            if clock >= restUntil { oneLeg = false; headTarget = 0.1; headBack = false }
-            restUntil = max(restUntil, clock + 0.5)
-        }
         return false
+    }
+
+    /// ↓ on a perch in your hands: it lets go and slips down under it,
+    /// wings opening; with ↓ still held it sinks on to the next perch below.
+    private func dropBelow() {
+        guard case .standing = mode, let perch else { return }
+        let y = p.y
+        world.jolt(perch.kind, at: p, strength: 1.0)
+        depthSpeed += 24
+        mode = .flying
+        // Its feet just under the perch, so it does not land there again.
+        p.y += GullPictures.lift - 6 * k
+        v = CGVector(dx: facing * 40, dy: -220)
+        lastFeet = y - 6 * k
+        wingPhase = 0.1
+        flapUntil = clock + 0.4
+        self.perch = nil
+        walkTo = nil
+        stopFussing()
+        squawks = 0
+        world.air(at: p, velocity: CGVector(dx: 0, dy: 300))
     }
 
     /// Whatever it was busy with standing, dropped.
@@ -1796,6 +1821,8 @@ final class GullVisit: NSObject {
         walkTo = nil
         // Wings up for a moment, then folded, the feathers settling.
         touchdownUntil = clock + 0.16
+        // Landed with ↓ held: it stays until ↓ is pressed again.
+        downStillHeld = controlled && world.arrowsHeld.contains(.down)
         crouchUntil = clock + 0.3
         ruffledUntil = clock + 0.7
         headTarget = 0.1
