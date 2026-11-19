@@ -9,7 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let line = Line()
     private var panel: LinePanel!
     private var statusItem: NSStatusItem!
-    private var watcher: ScreenshotWatcher!
+    private var watcher: ScreenshotWatcher?
     /// In inbox mode, a second watcher on the Desktop. If a macOS version
     /// ignores the screenshot settings (macOS 27 renamed one), captures keep
     /// landing on the Desktop, and they still hang on the line.
@@ -85,7 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         noNap = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep],
                                                       reason: "The line and the decorations answer the pointer")
 
-        if Inbox.isEnabled { Inbox.apply() }
+        if Inbox.isEnabled { Inbox.apply() } else { Inbox.restore() }
         restoreSettingsOnTermination()
         startWatcher()
 
@@ -164,10 +164,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if alwaysShow { setAlwaysShow(true) }
 
-        if !Inbox.wasOffered {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.offerInbox() }
-        }
-
         if !UserDefaults.standard.bool(forKey: "welcomed") {
             UserDefaults.standard.set(true, forKey: "welcomed")
             keepOpen = true
@@ -194,12 +190,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func startWatcher() {
         watcher?.stop()
         safetyWatcher?.stop()
+        watcher = nil
         safetyWatcher = nil
-        watcher = ScreenshotWatcher(
+        guard Inbox.isEnabled else { return }
+
+        let watcher = ScreenshotWatcher(
             onNew: { [weak self] url in self?.hangCapture(url) },
             onChange: { [weak self] in self?.line.prune() })
+        self.watcher = watcher
         watcher.start()
-        if Inbox.isEnabled, watcher.folder.standardizedFileURL != ScreenshotWatcher.desktop.standardizedFileURL {
+        if watcher.folder.standardizedFileURL != ScreenshotWatcher.desktop.standardizedFileURL {
             let safety = ScreenshotWatcher(
                 folder: ScreenshotWatcher.desktop,
                 onNew: { [weak self] url in
@@ -216,22 +216,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Inbox.isEnabled = on
         if on { Inbox.apply() } else { Inbox.restore() }
         startWatcher()
-    }
-
-    /// Asked once. Changing system settings is the user's call, never ours.
-    private func offerInbox() {
-        Inbox.wasOffered = true
-        let alert = NSAlert()
-        alert.messageText = L("Let Tendedero handle your screenshots?",
-                              "¿Quieres que Tendedero se encargue de tus capturas?")
-        alert.informativeText = L(
-            "Screenshots will hang on the line the instant you take them, without the floating thumbnail, and will not pile up on your Desktop. Drag one to a folder to keep it, or discard it with the cross. You can turn this off from the menu bar, and your settings come back when Tendedero quits.",
-            "Las capturas se colgarán al instante, sin la miniatura flotante, y no se acumularán en el Escritorio. Arrastra una a una carpeta para guardarla, o descártala con la cruz. Puedes desactivarlo desde la barra de menús, y tus ajustes vuelven a ser los de antes al salir de Tendedero.")
-        alert.addButton(withTitle: L("Turn on", "Activar"))
-        alert.addButton(withTitle: L("Not now", "Ahora no"))
-        if let icon = NSImage(named: "Tendedero") ?? NSApp.applicationIconImage { alert.icon = icon }
-        NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn { setInbox(true) }
     }
 
     /// Quitting from the menu or logging out runs applicationWillTerminate.
@@ -285,6 +269,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func hangCapture(_ url: URL, thumb: NSImage) {
+        guard Inbox.isEnabled else { return }
         let from = captureRect(of: url)
         if let from {
             let center = CGPoint(x: from.midX, y: from.midY)
@@ -701,8 +686,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(inbox)
 
         menu.addItem(ClosureMenuItem(L("Open screenshots folder", "Abrir carpeta de capturas")) { [weak self] in
-            guard let self else { return }
-            NSWorkspace.shared.open(self.watcher.folder)
+            NSWorkspace.shared.open(self?.watcher?.folder ?? ScreenshotWatcher.screenshotFolder())
         })
 
         menu.addItem(.separator())

@@ -18,8 +18,8 @@ enum Inbox {
     private static let screenshotLocationKey = "location-screenshot" as CFString
     private static let thumbnailKey = "show-thumbnail" as CFString
 
-    private static let enabledKey = "inboxEnabled"
-    private static let offeredKey = "inboxOffered"
+    // Require a fresh opt-in when upgrading from the old, always-watching mode.
+    static let enabledKey = "handleScreenshots"
     private static let savedKey = "inboxSavedSettings"
 
     static let folder: URL = {
@@ -33,24 +33,18 @@ enum Inbox {
         set { UserDefaults.standard.set(newValue, forKey: enabledKey) }
     }
 
-    /// Whether we already asked, so the offer appears only once.
-    static var wasOffered: Bool {
-        get { UserDefaults.standard.bool(forKey: offeredKey) }
-        set { UserDefaults.standard.set(newValue, forKey: offeredKey) }
-    }
-
-    /// Whether macOS is currently sending screenshots to our folder.
-    static var isApplied: Bool {
-        guard let current = CFPreferencesCopyAppValue(locationKey, domain) as? String else { return false }
+    private static func ownsLocation(_ key: CFString) -> Bool {
+        guard let current = CFPreferencesCopyAppValue(key, domain) as? String else { return false }
         return URL(fileURLWithPath: (current as NSString).expandingTildeInPath).standardizedFileURL
             == folder.standardizedFileURL
     }
 
     static func apply() {
+        CFPreferencesAppSynchronize(domain)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         // Never save our own values as the "previous" ones, for example after
         // a crash left them applied.
-        if !isApplied {
+        if !ownsLocation(locationKey) && !ownsLocation(screenshotLocationKey) {
             let saved: [String: Any] = [
                 "location": CFPreferencesCopyAppValue(locationKey, domain) as? String ?? NSNull(),
                 "locationScreenshot": CFPreferencesCopyAppValue(screenshotLocationKey, domain) as? String ?? NSNull(),
@@ -64,10 +58,13 @@ enum Inbox {
     }
 
     static func restore() {
-        guard isApplied else { return }
+        CFPreferencesAppSynchronize(domain)
+        let ownsLegacyLocation = ownsLocation(locationKey)
+        let ownsScreenshotLocation = ownsLocation(screenshotLocationKey)
+        guard ownsLegacyLocation || ownsScreenshotLocation else { return }
         let saved = UserDefaults.standard.dictionary(forKey: savedKey) ?? [:]
-        set(locationKey, saved["location"])
-        set(screenshotLocationKey, saved["locationScreenshot"])
+        if ownsLegacyLocation { set(locationKey, saved["location"]) }
+        if ownsScreenshotLocation { set(screenshotLocationKey, saved["locationScreenshot"]) }
         set(thumbnailKey, saved["thumbnail"])
         UserDefaults.standard.removeObject(forKey: savedKey)
     }

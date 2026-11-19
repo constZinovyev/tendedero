@@ -26,6 +26,7 @@ enum Layout {
 
 struct LineView: View {
     @ObservedObject var line: Line
+    @AppStorage(Inbox.enabledKey) private var handlesScreenshots = false
 
     var body: some View {
         GeometryReader { geo in
@@ -34,7 +35,7 @@ struct LineView: View {
                 RopeHost(bend: line.rope)
                     .frame(width: width, height: Layout.panelHeight)
 
-                if line.items.isEmpty {
+                if line.items.isEmpty && handlesScreenshots {
                     Hint()
                         .position(x: width / 2, y: Layout.ropeY(x: width / 2, width: width) + 34)
                         .transition(.opacity)

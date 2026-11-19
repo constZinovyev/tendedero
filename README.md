@@ -15,7 +15,7 @@
 
 ## Out of sight. Within reach.
 
-Every screenshot you take hangs on a line just above your screen.
+Turn on **Handle screenshots** in the menu bar to hang new screenshots on a line just above your screen.
 Rest the pointer in the menu bar and it glides down. Move away and it's gone.
 
 <picture>
@@ -137,7 +137,7 @@ Every image here, the icon included, is drawn in code by
 ---
 
 <sub>
-1. On first launch, Tendedero offers to handle your screenshots. If you accept, it turns off the floating thumbnail and saves new screenshots to its own folder, two settings also found under Options in Cmd+Shift+5. Your previous settings are saved and restored when Tendedero quits or the option is turned off from the menu bar. Tendedero hides automatically while an app is in full screen.
+1. Screenshot handling is off by default. macOS saves captures to the folder selected under Options in Cmd+Shift+5. When you turn on **Handle screenshots**, Tendedero turns off the floating thumbnail and saves new screenshots to its own folder. It restores your previous settings when it quits or you turn the option off. Tendedero hides automatically while an app is in full screen.
 </sub>
 
 <br>
